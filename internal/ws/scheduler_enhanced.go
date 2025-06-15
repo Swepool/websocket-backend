@@ -261,19 +261,22 @@ func (es *EnhancedScheduler) groupTransfersByTimeWindow(transfers []models.Trans
 func (es *EnhancedScheduler) enhanceTransfersWithChains(transfers []models.Transfer, chains []models.Chain) []models.Transfer {
 	enhanced := make([]models.Transfer, 0, len(transfers))
 	
+	// Create address formatter
+	addressFormatter := utils.NewAddressFormatter()
+	
 	for _, transfer := range transfers {
 		// Create enhanced copy
 		enhancedTransfer := transfer
 		
-		// Get source chain display name
-		enhancedTransfer.SourceDisplayName = es.getChainDisplayNameSafe(chains, 
-			transfer.SourceChain.UniversalChainID, 
+		// Get source chain info
+		sourceChain := es.getChainInfoSafe(chains, transfer.SourceChain.UniversalChainID)
+		enhancedTransfer.SourceDisplayName = es.getChainDisplayNameFromInfo(sourceChain, 
 			transfer.SourceChain.DisplayName, 
 			transfer.SourceChain.ChainID)
 		
-		// Get destination chain display name
-		enhancedTransfer.DestinationDisplayName = es.getChainDisplayNameSafe(chains, 
-			transfer.DestinationChain.UniversalChainID, 
+		// Get destination chain info
+		destChain := es.getChainInfoSafe(chains, transfer.DestinationChain.UniversalChainID)
+		enhancedTransfer.DestinationDisplayName = es.getChainDisplayNameFromInfo(destChain, 
 			transfer.DestinationChain.DisplayName, 
 			transfer.DestinationChain.ChainID)
 		
@@ -286,9 +289,17 @@ func (es *EnhancedScheduler) enhanceTransfersWithChains(transfers []models.Trans
 		// Create route key for grouping
 		enhancedTransfer.RouteKey = transfer.SourceChain.UniversalChainID + "->" + transfer.DestinationChain.UniversalChainID
 		
-		// Set display addresses (for now, same as canonical - could be enhanced later with ENS/chain-specific formatting)
-		enhancedTransfer.SenderDisplay = transfer.SenderCanonical
-		enhancedTransfer.ReceiverDisplay = transfer.ReceiverCanonical
+		// Format addresses based on chain type
+		enhancedTransfer.SenderDisplay = addressFormatter.FormatAddress(
+			transfer.SenderCanonical,
+			sourceChain.RpcType,
+			sourceChain.AddrPrefix,
+		)
+		enhancedTransfer.ReceiverDisplay = addressFormatter.FormatAddress(
+			transfer.ReceiverCanonical,
+			destChain.RpcType,  
+			destChain.AddrPrefix,
+		)
 		
 		enhanced = append(enhanced, enhancedTransfer)
 	}
@@ -296,13 +307,28 @@ func (es *EnhancedScheduler) enhanceTransfersWithChains(transfers []models.Trans
 	return enhanced
 }
 
-// getChainDisplayNameSafe safely gets the display name for a chain
-func (es *EnhancedScheduler) getChainDisplayNameSafe(chains []models.Chain, universalChainID, embeddedDisplayName, embeddedChainID string) string {
-	// First try to find by universal chain ID
+// getChainInfoSafe safely gets the chain info for a given universal chain ID
+func (es *EnhancedScheduler) getChainInfoSafe(chains []models.Chain, universalChainID string) models.Chain {
+	// Find by universal chain ID
 	for _, chain := range chains {
 		if chain.UniversalChainID == universalChainID {
-			return chain.DisplayName
+			return chain
 		}
+	}
+	
+	// Return empty chain if not found
+	return models.Chain{
+		UniversalChainID: universalChainID,
+		RpcType:          "",
+		AddrPrefix:       "",
+	}
+}
+
+// getChainDisplayNameFromInfo gets display name from chain info
+func (es *EnhancedScheduler) getChainDisplayNameFromInfo(chainInfo models.Chain, embeddedDisplayName, embeddedChainID string) string {
+	// Try chain info first
+	if chainInfo.DisplayName != "" {
+		return chainInfo.DisplayName
 	}
 	
 	// Fallback to embedded display name if available
@@ -315,7 +341,7 @@ func (es *EnhancedScheduler) getChainDisplayNameSafe(chains []models.Chain, univ
 		return embeddedChainID
 	}
 	
-	return universalChainID
+	return chainInfo.UniversalChainID
 }
 
 // pollForTransfers polls for new transfers (moved from deleted scheduler.go)
@@ -397,11 +423,19 @@ func (s *Server) periodicChainRefresh(ctx context.Context) {
 func (s *Server) enhanceTransfers(transfers []models.Transfer) []models.Transfer {
 	// Don't use mutex here since we're already inside a mutex from scheduleTransfers
 	enhanced := make([]models.Transfer, len(transfers))
+	
+	// Create address formatter
+	addressFormatter := utils.NewAddressFormatter()
+	
 	for i, transfer := range transfers {
 		enhanced[i] = transfer
 
 		// Set testnet flag based on embedded chain data
 		enhanced[i].IsTestnetTransfer = transfer.SourceChain.Testnet || transfer.DestinationChain.Testnet
+		
+		// Get chain info for address formatting
+		sourceChain := s.getChainInfo(transfer.SourceChain.UniversalChainID)
+		destChain := s.getChainInfo(transfer.DestinationChain.UniversalChainID)
 		
 		// Use display names from embedded chain data, with fallbacks to separate chains data
 		enhanced[i].SourceDisplayName = s.getChainDisplayName(transfer.SourceChain.UniversalChainID, transfer.SourceChain.DisplayName, transfer.SourceChain.ChainID)
@@ -413,12 +447,37 @@ func (s *Server) enhanceTransfers(transfers []models.Transfer) []models.Transfer
 		// Create route key using display names for better readability
 		enhanced[i].RouteKey = enhanced[i].SourceDisplayName + "->" + enhanced[i].DestinationDisplayName
 		
-		// Store full addresses - frontend will handle display truncation
-		enhanced[i].SenderDisplay = transfer.SenderCanonical
-		enhanced[i].ReceiverDisplay = transfer.ReceiverCanonical
+		// Format addresses based on chain type
+		enhanced[i].SenderDisplay = addressFormatter.FormatAddress(
+			transfer.SenderCanonical,
+			sourceChain.RpcType,
+			sourceChain.AddrPrefix,
+		)
+		enhanced[i].ReceiverDisplay = addressFormatter.FormatAddress(
+			transfer.ReceiverCanonical,
+			destChain.RpcType,
+			destChain.AddrPrefix,
+		)
 	}
 	
 	return enhanced
+}
+
+// getChainInfo gets chain info for a given universal chain ID
+func (s *Server) getChainInfo(universalChainID string) models.Chain {
+	// Find by universal chain ID in chains data
+	for _, chain := range s.chains {
+		if chain.UniversalChainID == universalChainID {
+			return chain
+		}
+	}
+	
+	// Return empty chain if not found
+	return models.Chain{
+		UniversalChainID: universalChainID,
+		RpcType:          "",
+		AddrPrefix:       "",
+	}
 }
 
 // getChainDisplayName gets the best display name for a chain, matching Node.js logic

@@ -93,6 +93,8 @@ type Chain struct {
 	DisplayName      string `json:"display_name"`
 	ChainID          string `json:"chain_id"`
 	Testnet          bool   `json:"testnet"`
+	RpcType          string `json:"rpc_type"`
+	AddrPrefix       string `json:"addr_prefix"`
 }
 
  

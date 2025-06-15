@@ -96,8 +96,6 @@ const (
 		%s
 	`
 
-
-
 	chainsQuery = `
 		query Chains {
 			v2_chains {
@@ -105,6 +103,8 @@ const (
 				display_name
 				chain_id
 				testnet
+				rpc_type
+				addr_prefix
 			}
 		}
 	`
