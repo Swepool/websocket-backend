@@ -39,6 +39,7 @@ type TransferRates struct {
 	TxPer7DaysChange    float64          `json:"txPer7DaysChange"`
 	TxPer14DaysChange   float64          `json:"txPer14DaysChange"`
 	TxPer30DaysChange   float64          `json:"txPer30DaysChange"`
+
 	TotalTracked        int64            `json:"totalTracked"`
 	DataAvailability    DataAvailability `json:"dataAvailability"`
 	ServerUptimeSeconds float64          `json:"serverUptimeSeconds"`
@@ -72,6 +73,7 @@ type ActiveWalletRates struct {
 	ReceiversLast7dChange   float64 `json:"receiversLast7dChange"`
 	ReceiversLast14dChange  float64 `json:"receiversLast14dChange"`
 	ReceiversLast30dChange  float64 `json:"receiversLast30dChange"`
+	// Totals
 	TotalLastMin        int `json:"totalLastMin"`
 	TotalLastHour       int `json:"totalLastHour"`
 	TotalLastDay        int `json:"totalLastDay"`
@@ -85,6 +87,7 @@ type ActiveWalletRates struct {
 	TotalLast7dChange       float64 `json:"totalLast7dChange"`
 	TotalLast14dChange      float64 `json:"totalLast14dChange"`
 	TotalLast30dChange      float64 `json:"totalLast30dChange"`
+	
 	UniqueSendersTotal  int `json:"uniqueSendersTotal"`
 	UniqueReceiversTotal int `json:"uniqueReceiversTotal"`
 	UniqueTotalWallets  int `json:"uniqueTotalWallets"`
@@ -231,32 +234,40 @@ func (ec *EnhancedCollector) UpdateTransferStats(transfers []models.Transfer) {
 			}
 		}
 
-		// Update sender stats
-		if senderStats, exists := ec.senderStats[transfer.SenderCanonical]; exists {
+		// Update sender stats (use formatted address for display)
+		senderAddress := transfer.SenderDisplay
+		if senderAddress == "" {
+			senderAddress = transfer.SenderCanonical // Fallback to canonical if no formatted address
+		}
+		if senderStats, exists := ec.senderStats[senderAddress]; exists {
 			senderStats.Count++
 			// Update LastActivity to the most recent transfer timestamp
 			if transfer.TransferSendTimestamp.After(senderStats.LastActivity) {
 				senderStats.LastActivity = transfer.TransferSendTimestamp
 			}
 		} else {
-			ec.senderStats[transfer.SenderCanonical] = &WalletStats{
+			ec.senderStats[senderAddress] = &WalletStats{
 				Count:        1,
-				Address:      transfer.SenderCanonical,
+				Address:      senderAddress,
 				LastActivity: transfer.TransferSendTimestamp,
 			}
 		}
 
-		// Update receiver stats
-		if receiverStats, exists := ec.receiverStats[transfer.ReceiverCanonical]; exists {
+		// Update receiver stats (use formatted address for display)
+		receiverAddress := transfer.ReceiverDisplay
+		if receiverAddress == "" {
+			receiverAddress = transfer.ReceiverCanonical // Fallback to canonical if no formatted address
+		}
+		if receiverStats, exists := ec.receiverStats[receiverAddress]; exists {
 			receiverStats.Count++
 			// Update LastActivity to the most recent transfer timestamp
 			if transfer.TransferSendTimestamp.After(receiverStats.LastActivity) {
 				receiverStats.LastActivity = transfer.TransferSendTimestamp
 			}
 		} else {
-			ec.receiverStats[transfer.ReceiverCanonical] = &WalletStats{
+			ec.receiverStats[receiverAddress] = &WalletStats{
 				Count:        1,
-				Address:      transfer.ReceiverCanonical,
+				Address:      receiverAddress,
 				LastActivity: transfer.TransferSendTimestamp,
 			}
 		}
@@ -268,15 +279,15 @@ func (ec *EnhancedCollector) UpdateTransferStats(transfers []models.Transfer) {
 			SenderCount:   1,
 			ReceiverCount: 1,
 			TotalCount:    1,
-			Senders:       []string{transfer.SenderCanonical},
-			Receivers:     []string{transfer.ReceiverCanonical},
+			Senders:       []string{senderAddress},
+			Receivers:     []string{receiverAddress},
 		})
 
 		// Add wallet activity to time-based tracking
 		ec.walletTimeData = append(ec.walletTimeData, WalletTimeData{
 			Timestamp: transfer.TransferSendTimestamp,
-			Sender:    transfer.SenderCanonical,
-			Receiver:  transfer.ReceiverCanonical,
+			Sender:    senderAddress,
+			Receiver:  receiverAddress,
 		})
 
 		// Add route activity to time-based tracking for timeframe-specific analysis

@@ -41,48 +41,80 @@ func (af *AddressFormatter) formatCosmosAddress(canonicalAddress, prefix string)
 		return canonicalAddress
 	}
 
-	// For now, we'll do a simple concatenation
-	// In a production environment, you'd want to use proper bech32 encoding
-	// like github.com/cosmos/cosmos-sdk/types/bech32
+	// Clean the canonical address
+	cleanCanonical := strings.TrimSpace(canonicalAddress)
 	
 	// If the canonical address is already in bech32 format with correct prefix, return it
-	if strings.HasPrefix(canonicalAddress, prefix+"1") {
-		return canonicalAddress
+	if strings.HasPrefix(cleanCanonical, prefix+"1") && len(cleanCanonical) > 39 {
+		return cleanCanonical
+	}
+	
+	// If it's already a bech32 address but with different prefix, return canonical as-is
+	// (proper conversion between different bech32 prefixes requires decoding/re-encoding)
+	if af.isBech32Like(cleanCanonical) {
+		return cleanCanonical
 	}
 	
 	// If canonical address is hex, convert it to bech32-like format
-	if strings.HasPrefix(canonicalAddress, "0x") || af.isHex(canonicalAddress) {
-		// This is a simplified approach - you should use proper bech32 library
-		cleanHex := strings.TrimPrefix(canonicalAddress, "0x")
-		if len(cleanHex) == 40 { // Standard address length
-			// Convert to cosmos-style address (simplified)
-			return af.hexToBech32(cleanHex, prefix)
+	if strings.HasPrefix(cleanCanonical, "0x") || af.isHex(cleanCanonical) {
+		cleanHex := strings.TrimPrefix(cleanCanonical, "0x")
+		if len(cleanHex) >= 32 { // At least 16 bytes
+			return af.hexToBech32Like(cleanHex, prefix)
 		}
 	}
 	
-	// Fallback: return canonical address as-is
+	// For other cases, return canonical address as-is
 	return canonicalAddress
 }
 
-// formatEVMAddress formats an EVM address with proper 0x prefix
+// formatEVMAddress formats an EVM address with proper 0x prefix and validation
 func (af *AddressFormatter) formatEVMAddress(canonicalAddress string) string {
 	// Clean the address
 	cleanAddr := strings.TrimSpace(canonicalAddress)
 	
-	// If it's already a proper EVM address, return it
+	// If it's already a proper EVM address, return it (with proper case)
 	if strings.HasPrefix(cleanAddr, "0x") && len(cleanAddr) == 42 {
-		return cleanAddr
+		return af.normalizeEVMAddress(cleanAddr)
 	}
 	
 	// If it's hex without 0x prefix, add it
 	if af.isHex(cleanAddr) && len(cleanAddr) == 40 {
-		return "0x" + cleanAddr
+		return af.normalizeEVMAddress("0x" + cleanAddr)
 	}
 	
-	// If it's not hex, it might be a cosmos address that needs conversion
-	// This is complex and would require proper address conversion
-	// For now, return as-is
+	// If it looks like a bech32 address, we can't easily convert it
+	// This would require complex address derivation logic
+	if af.isBech32Like(cleanAddr) {
+		return canonicalAddress // Return as-is for now
+	}
+	
+	// Handle other hex variations (with or without 0x, different lengths)
+	hexAddr := strings.TrimPrefix(cleanAddr, "0x")
+	if af.isHex(hexAddr) {
+		// If it's shorter than 40 chars, pad with zeros
+		if len(hexAddr) < 40 {
+			hexAddr = strings.Repeat("0", 40-len(hexAddr)) + hexAddr
+		}
+		// If it's longer than 40 chars, take the last 40 chars (address part)
+		if len(hexAddr) > 40 {
+			hexAddr = hexAddr[len(hexAddr)-40:]
+		}
+		return af.normalizeEVMAddress("0x" + hexAddr)
+	}
+	
+	// For non-hex addresses, return as-is
 	return canonicalAddress
+}
+
+// normalizeEVMAddress ensures proper EVM address format (lowercase for now)
+// In production, you might want to implement EIP-55 checksum encoding
+func (af *AddressFormatter) normalizeEVMAddress(address string) string {
+	if !strings.HasPrefix(address, "0x") || len(address) != 42 {
+		return address
+	}
+	
+	// Convert to lowercase for consistency (EIP-55 checksumming would go here)
+	return strings.ToLower(address)
 }
 
 // isHex checks if a string is valid hexadecimal
@@ -91,28 +123,48 @@ func (af *AddressFormatter) isHex(s string) bool {
 	return err == nil
 }
 
-// hexToBech32 converts a hex address to a bech32-like format (simplified)
-// This is a basic implementation - use proper bech32 library in production
-func (af *AddressFormatter) hexToBech32(hexAddr, prefix string) string {
-	// This is a very simplified conversion
-	// In reality, you'd need proper bech32 encoding with checksum
+// isBech32Like checks if an address looks like a bech32 address
+func (af *AddressFormatter) isBech32Like(addr string) bool {
+	// Basic check: contains "1" separator and has reasonable length
+	parts := strings.Split(addr, "1")
+	if len(parts) != 2 {
+		return false
+	}
 	
+	prefix := parts[0]
+	data := parts[1]
+	
+	// Prefix should be 3-10 chars, data should be at least 30 chars for typical address
+	return len(prefix) >= 3 && len(prefix) <= 10 && len(data) >= 30
+}
+
+// hexToBech32Like converts a hex address to a bech32-like format (simplified)
+// This is NOT real bech32 encoding - use proper bech32 library in production
+func (af *AddressFormatter) hexToBech32Like(hexAddr, prefix string) string {
 	// Decode hex to bytes
 	bytes, err := hex.DecodeString(hexAddr)
 	if err != nil {
 		return hexAddr // Return original if conversion fails
 	}
 	
-	// Hash the bytes (simplified - real bech32 uses different encoding)
+	// For addresses, we typically want to use the first 20 bytes (160 bits)
+	// If we have more than 20 bytes, truncate to 20 bytes
+	if len(bytes) > 20 {
+		bytes = bytes[:20]
+	}
+	
+	// Hash the bytes using RIPEMD160 to get consistent 20-byte output
 	hasher := ripemd160.New()
 	hasher.Write(bytes)
 	hash := hasher.Sum(nil)
 	
-	// Convert back to hex (this is NOT proper bech32, just a placeholder)
+	// Convert to lowercase hex (full 40 characters for 20 bytes)
 	hashHex := hex.EncodeToString(hash)
 	
-	// Return with prefix (this is a simplified format, not real bech32)
-	return fmt.Sprintf("%s1%s", prefix, hashHex[:20])
+	// Create a more realistic bech32-like address
+	// Real bech32 uses base32 encoding, but we'll use hex for simplicity
+	// Format: prefix + "1" + full_hash (this gives ~45 character addresses)
+	return fmt.Sprintf("%s1%s", prefix, hashHex)
 }
 
 // NewAddressFormatter creates a new AddressFormatter instance
