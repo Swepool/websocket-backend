@@ -303,7 +303,9 @@ func (s *Server) Run() {
 
 	// Start HTTP server
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		utils.LogError(utils.NetworkError("SERVER_START_FAILED", "Failed to start HTTP server", "SERVER"), s.logger, map[string]interface{}{
+		networkErr := utils.NewAppError(utils.ErrorTypeNetwork, "SERVER_START_FAILED", "Failed to start HTTP server", "SERVER")
+		networkErr.Retryable = true
+		utils.LogError(networkErr, s.logger, map[string]interface{}{
 			"port": s.config.Port,
 		})
 	}

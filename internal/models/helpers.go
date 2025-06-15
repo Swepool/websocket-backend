@@ -1,15 +1,5 @@
 package models
 
-import "strings"
-
-// TruncateAddress truncates an address for display purposes
-func TruncateAddress(address string) string {
-	if len(address) <= 12 {
-		return address
-	}
-	return address[:6] + "..." + address[len(address)-4:]
-}
-
 // ChainFilter represents a filter for transfers by chain
 type ChainFilter struct {
 	FromChain string `json:"fromChain"`
@@ -86,20 +76,4 @@ func (bt *BroadcastTransfer) MatchesFilter(filter *ChainFilter) bool {
 	
 	// If no filter is specified, match all
 	return true
-}
-
-// GetDisplayName returns the best display name for a chain
-func GetDisplayName(chain Chain) string {
-	if chain.DisplayName != "" {
-		return chain.DisplayName
-	}
-	if chain.ChainID != "" {
-		return chain.ChainID
-	}
-	return chain.UniversalChainID
-}
-
-// IsTestnetChain checks if a chain is a testnet chain
-func IsTestnetChain(chain Chain) bool {
-	return chain.Testnet || strings.Contains(strings.ToLower(chain.ChainID), "test")
 } 
