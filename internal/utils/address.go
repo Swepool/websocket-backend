@@ -95,10 +95,7 @@ func (af *AddressFormatter) formatEVMAddress(canonicalAddress string) string {
 		if len(hexAddr) < 40 {
 			hexAddr = strings.Repeat("0", 40-len(hexAddr)) + hexAddr
 		}
-		// If it's longer than 40 chars, take the last 40 chars (address part)
-		if len(hexAddr) > 40 {
-			hexAddr = hexAddr[len(hexAddr)-40:]
-		}
+		// Preserve full length - no truncation for longer addresses
 		return af.normalizeEVMAddress("0x" + hexAddr)
 	}
 	
@@ -109,11 +106,12 @@ func (af *AddressFormatter) formatEVMAddress(canonicalAddress string) string {
 // normalizeEVMAddress ensures proper EVM address format (lowercase for now)
 // In production, you might want to implement EIP-55 checksum encoding
 func (af *AddressFormatter) normalizeEVMAddress(address string) string {
-	if !strings.HasPrefix(address, "0x") || len(address) != 42 {
+	if !strings.HasPrefix(address, "0x") {
 		return address
 	}
 	
 	// Convert to lowercase for consistency (EIP-55 checksumming would go here)
+	// Preserve full length - no restriction to 42 characters
 	return strings.ToLower(address)
 }
 
@@ -147,13 +145,8 @@ func (af *AddressFormatter) hexToBech32Like(hexAddr, prefix string) string {
 		return hexAddr // Return original if conversion fails
 	}
 	
-	// For addresses, we typically want to use the first 20 bytes (160 bits)
-	// If we have more than 20 bytes, truncate to 20 bytes
-	if len(bytes) > 20 {
-		bytes = bytes[:20]
-	}
-	
-	// Hash the bytes using RIPEMD160 to get consistent 20-byte output
+	// Preserve full length - no truncation
+	// Hash the full bytes using RIPEMD160 to get consistent output
 	hasher := ripemd160.New()
 	hasher.Write(bytes)
 	hash := hasher.Sum(nil)
