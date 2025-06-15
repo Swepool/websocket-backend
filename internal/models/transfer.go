@@ -49,14 +49,16 @@ type BroadcastTransfer struct {
 		UniversalChainID string `json:"universal_chain_id"`
 		DisplayName      string `json:"display_name"`
 	} `json:"destination_chain"`
-	TransferSendTxHash     string    `json:"transfer_send_transaction_hash"`
-	PacketHash             string    `json:"packet_hash"`
-	SortOrder              string    `json:"sort_order"`             	
-	IsTestnetTransfer      bool      `json:"isTestnetTransfer"`
-	FormattedTimestamp     string    `json:"formattedTimestamp"`
-	RouteKey               string    `json:"routeKey"`
-	SenderDisplay          string    `json:"senderDisplay"`
-	ReceiverDisplay        string    `json:"receiverDisplay"`
+	SourceUniversalChainID      string `json:"sourceUniversalChainID"`
+	DestinationUniversalChainID string `json:"destinationUniversalChainID"`
+	TransferSendTxHash          string `json:"transfer_send_transaction_hash"`
+	PacketHash                  string `json:"packet_hash"`
+	SortOrder                   string `json:"sort_order"`
+	IsTestnetTransfer           bool   `json:"isTestnetTransfer"`
+	FormattedTimestamp          string `json:"formattedTimestamp"`
+	RouteKey                    string `json:"routeKey"`
+	SenderDisplay               string `json:"senderDisplay"`
+	ReceiverDisplay             string `json:"receiverDisplay"`
 }
 
 // ToBroadcastTransfer converts a Transfer to a BroadcastTransfer with optimized fields
@@ -76,14 +78,17 @@ func (t *Transfer) ToBroadcastTransfer() *BroadcastTransfer {
 			UniversalChainID: t.DestinationChain.UniversalChainID,
 			DisplayName:      t.DestinationChain.DisplayName,
 		},
-		TransferSendTxHash:     t.TransferSendTxHash,
-		PacketHash:             t.PacketHash,
-		SortOrder:              t.SortOrder,             
-		IsTestnetTransfer:      t.IsTestnetTransfer,
-		FormattedTimestamp:     t.FormattedTimestamp,
-		RouteKey:               t.RouteKey,
-		SenderDisplay:          t.SenderDisplay,
-		ReceiverDisplay:        t.ReceiverDisplay,
+		// Direct chain ID access for frontend convenience
+		SourceUniversalChainID:      t.SourceChain.UniversalChainID,
+		DestinationUniversalChainID: t.DestinationChain.UniversalChainID,
+		TransferSendTxHash:          t.TransferSendTxHash,
+		PacketHash:                  t.PacketHash,
+		SortOrder:                   t.SortOrder,
+		IsTestnetTransfer:           t.IsTestnetTransfer,
+		FormattedTimestamp:          t.FormattedTimestamp,
+		RouteKey:                    t.RouteKey,
+		SenderDisplay:               t.SenderDisplay,
+		ReceiverDisplay:             t.ReceiverDisplay,
 	}
 }
 
