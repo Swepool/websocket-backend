@@ -42,8 +42,9 @@ var upgrader = websocket.Upgrader{
     CheckOrigin: func(r *http.Request) bool {
         return true // Allow all origins in development
     },
-    ReadBufferSize:  1024,
-    WriteBufferSize: 1024,
+    ReadBufferSize:   1024,
+    WriteBufferSize:  1024,
+    EnableCompression: true, // Enable WebSocket compression
 }
 
 // recoverMiddleware wraps handlers with panic recovery and centralized JSON responses
@@ -123,6 +124,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("Failed to send server info", map[string]interface{}{
 			"error": err.Error(),
 		})
+	}
+
+	// Send current chart data immediately so client doesn't have to wait for next broadcast
+	if chartData := s.getChartData(); chartData != nil {
+		if err := client.SendChartData(chartData); err != nil {
+			s.logger.Warn("Failed to send initial chart data", map[string]interface{}{
+				"error": err.Error(),
+			})
+		} else {
+			s.logger.Debug("Sent initial chart data to new client", map[string]interface{}{
+				"client_connected": true,
+			})
+		}
 	}
 
 	// Start client goroutines

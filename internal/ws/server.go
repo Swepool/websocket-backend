@@ -76,6 +76,10 @@ type Server struct {
 	// Enhanced scheduling
 	enhancedScheduler *EnhancedScheduler
 	
+	// Stats deduplication
+	lastChartDataHash string    // Hash of last broadcasted chart data for deduplication
+	chartDataHashMu   sync.RWMutex // Mutex for chart data hash access
+	
 	// Simple status tracking
 	startTime        time.Time
 	

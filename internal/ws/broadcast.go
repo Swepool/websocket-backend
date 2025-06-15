@@ -2,12 +2,14 @@ package ws
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync/atomic"
 	"time"
 
 	"websocket-backend/internal/models"
 	"runtime/debug"
+	"crypto/sha256"
 )
 
 // BroadcastMessage represents a message to broadcast
@@ -256,6 +258,38 @@ func (s *Server) broadcastChartData() {
 		return
 	}
 	
+	// Check if deduplication is enabled
+	if s.config.EnableStatsDeduplication {
+		// Create hash of chart data for deduplication
+		chartDataJSON, err := json.Marshal(chartData)
+		if err != nil {
+			log.Printf("[CHART] Failed to marshal chart data for hashing: %v", err)
+			return
+		}
+		
+		hasher := sha256.New()
+		hasher.Write(chartDataJSON)
+		currentHash := fmt.Sprintf("%x", hasher.Sum(nil))
+		
+		// Check if data has changed
+		s.chartDataHashMu.RLock()
+		lastHash := s.lastChartDataHash
+		s.chartDataHashMu.RUnlock()
+		
+		if lastHash == currentHash {
+			// Data hasn't changed, skip broadcast
+			log.Printf("[CHART] Chart data unchanged, skipping broadcast")
+			return
+		}
+		
+		// Update the stored hash
+		s.chartDataHashMu.Lock()
+		s.lastChartDataHash = currentHash
+		s.chartDataHashMu.Unlock()
+		
+		log.Printf("[CHART] Chart data changed, broadcasting to clients")
+	}
+	
 	// Zero-copy optimization: Pre-encode chart data once
 	message := struct {
 		Type      string      `json:"type"`
@@ -350,12 +384,22 @@ func (s *Server) chartDataBroadcaster() {
 		}
 	}()
 	
-	ticker := time.NewTicker(1 * time.Second) // Broadcast every 1 second for real-time updates
+	// Use configurable interval from config (default 5s)
+	interval := s.config.StatsBroadcastInterval
+	if interval <= 0 {
+		interval = 5 * time.Second // Fallback to 5 seconds if not configured
+	}
+	
+	log.Printf("[CHART] Starting chart data broadcaster with %v interval (deduplication: %v)", 
+		interval, s.config.EnableStatsDeduplication)
+	
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	
 	for {
 		select {
 		case <-s.shutdown:
+			log.Printf("[CHART] Chart data broadcaster shutting down")
 			return
 		case <-ticker.C:
 			func() {
