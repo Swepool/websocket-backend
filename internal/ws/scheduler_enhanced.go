@@ -581,6 +581,7 @@ func (s *Server) pollForTransfers(ctx context.Context) {
 					// Get baseline
 					transfers, fetchErr := s.graphql.FetchLatestTransfers(ctx, 1, s.config.GetNetworkFilter())
 					if fetchErr != nil {
+						fmt.Printf("[POLL] FetchLatestTransfers error: %v\n", fetchErr)
 						err = fetchErr
 						s.handlePollingError(err, &consecutiveErrors, &lastErrorTime)
 						time.Sleep(sleepDuration)
@@ -597,6 +598,7 @@ func (s *Server) pollForTransfers(ctx context.Context) {
 					// Poll for new transfers
 					transfers, fetchErr := s.graphql.FetchNewTransfers(ctx, lastSortOrder, s.config.PollLimit, s.config.GetNetworkFilter())
 					if fetchErr != nil {
+						fmt.Printf("[POLL] FetchNewTransfers error: %v\n", fetchErr)
 						err = fetchErr
 						s.handlePollingError(err, &consecutiveErrors, &lastErrorTime)
 						time.Sleep(sleepDuration)

@@ -42,33 +42,7 @@ func New(endpoint string) *Client {
 
 // GraphQL queries
 const (
-	transferListFragment = `
-		fragment TransferListItem on v2_transfer_type {
-			source_chain {
-				universal_chain_id
-				display_name
-				chain_id
-				testnet
-			}
-			destination_chain {
-				universal_chain_id
-				display_name
-				chain_id
-				testnet
-			}
-			sender_canonical
-			receiver_canonical
-			transfer_send_timestamp
-			transfer_send_transaction_hash
-			transfer_recv_timestamp
-			packet_hash
-			base_token
-			base_amount
-			quote_token
-			quote_amount
-			sort_order
-		}
-	`
+
 
 	latestTransfersQuery = `
 		query TransferListLatest($limit: Int!, $network: String) {
@@ -76,10 +50,56 @@ const (
 				p_limit: $limit,
 				p_network: $network
 			}) {
-				...TransferListItem
+				source_chain {
+					universal_chain_id
+					display_name
+					chain_id
+					testnet
+					rpc_type
+					addr_prefix
+				}
+				destination_chain {
+					universal_chain_id
+					display_name
+					chain_id
+					testnet
+					rpc_type
+					addr_prefix
+				}
+				sender_canonical
+				sender_display
+				receiver_canonical
+				receiver_display
+				transfer_send_timestamp
+				base_token
+				base_amount
+				base_token_symbol
+				base_token_decimals
+				base_token_meta {
+					denom
+					representations {
+						symbol
+						denom
+					}
+					universal_chain_id
+				}
+				quote_token
+				quote_amount
+				quote_token_meta {
+					denom
+					representations {
+						decimals
+						symbol
+						denom
+					}
+					universal_chain_id
+				}
+				sort_order
+				transfer_send_transaction_hash
+				transfer_recv_timestamp
+				packet_hash
 			}
 		}
-		%s
 	`
 
 	newTransfersQuery = `
@@ -90,10 +110,56 @@ const (
 				p_comparison: "gt",
 				p_network: $network
 			}) {
-				...TransferListItem
+				source_chain {
+					universal_chain_id
+					display_name
+					chain_id
+					testnet
+					rpc_type
+					addr_prefix
+				}
+				destination_chain {
+					universal_chain_id
+					display_name
+					chain_id
+					testnet
+					rpc_type
+					addr_prefix
+				}
+				sender_canonical
+				sender_display
+				receiver_canonical
+				receiver_display
+				transfer_send_timestamp
+				base_token
+				base_amount
+				base_token_symbol
+				base_token_decimals
+				base_token_meta {
+					denom
+					representations {
+						symbol
+						denom
+					}
+					universal_chain_id
+				}
+				quote_token
+				quote_amount
+				quote_token_meta {
+					denom
+					representations {
+						decimals
+						symbol
+						denom
+					}
+					universal_chain_id
+				}
+				sort_order
+				transfer_send_transaction_hash
+				transfer_recv_timestamp
+				packet_hash
 			}
 		}
-		%s
 	`
 
 	chainsQuery = `
@@ -168,6 +234,7 @@ func (c *Client) fetchGraphQL(ctx context.Context, query string, variables inter
 	}
 
 	if len(result.Errors) > 0 {
+		fmt.Printf("[GRAPHQL] GraphQL errors found: %v\n", result.Errors)
 		return nil, fmt.Errorf("graphql errors: %v", result.Errors)
 	}
 
@@ -184,7 +251,7 @@ func (c *Client) FetchLatestTransfers(ctx context.Context, limit int, network *s
 		variables["network"] = *network
 	}
 
-	result, err := c.fetchGraphQL(ctx, fmt.Sprintf(latestTransfersQuery, transferListFragment), variables)
+	result, err := c.fetchGraphQL(ctx, latestTransfersQuery, variables)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +269,7 @@ func (c *Client) FetchNewTransfers(ctx context.Context, lastSortOrder string, li
 		variables["network"] = *network
 	}
 
-	result, err := c.fetchGraphQL(ctx, fmt.Sprintf(newTransfersQuery, transferListFragment), variables)
+	result, err := c.fetchGraphQL(ctx, newTransfersQuery, variables)
 	if err != nil {
 		return nil, err
 	}

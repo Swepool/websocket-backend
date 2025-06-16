@@ -6,36 +6,46 @@ import (
 
 // Transfer represents a blockchain transfer (full version for server storage)
 type Transfer struct {
-	SourceChain struct {
-		UniversalChainID string `json:"universal_chain_id"`
-		DisplayName      string `json:"display_name"`
-		ChainID          string `json:"chain_id"`
-		Testnet          bool   `json:"testnet"`
-	} `json:"source_chain"`
-	DestinationChain struct {
-		UniversalChainID string `json:"universal_chain_id"`
-		DisplayName      string `json:"display_name"`
-		ChainID          string `json:"chain_id"`
-		Testnet          bool   `json:"testnet"`
-	} `json:"destination_chain"`
+	ID                     string    `json:"id"`
+	SourceChain            Chain     `json:"source_chain"`
+	DestinationChain       Chain     `json:"destination_chain"`
 	SenderCanonical        string    `json:"sender_canonical"`
+	SenderDisplay          string    `json:"sender_display"`
 	ReceiverCanonical      string    `json:"receiver_canonical"`
+	ReceiverDisplay        string    `json:"receiver_display"`
 	TransferSendTimestamp  time.Time `json:"transfer_send_timestamp"`
 	TransferSendTxHash     string    `json:"transfer_send_transaction_hash"`
 	TransferRecvTimestamp  time.Time `json:"transfer_recv_timestamp"`
 	PacketHash             string    `json:"packet_hash"`
 	BaseToken              string    `json:"base_token"`
 	BaseAmount             string    `json:"base_amount"`
+	BaseTokenSymbol        string    `json:"base_token_symbol"`
+	BaseTokenDecimals      int       `json:"base_token_decimals"`
+	BaseTokenMeta          struct {
+		Denom               string `json:"denom"`
+		Representations     []struct {
+			Symbol string `json:"symbol"`
+			Denom  string `json:"denom"`
+		} `json:"representations"`
+		UniversalChainID    string `json:"universal_chain_id"`
+	} `json:"base_token_meta"`
 	QuoteToken             string    `json:"quote_token"`
 	QuoteAmount            string    `json:"quote_amount"`
+	QuoteTokenMeta         struct {
+		Denom               string `json:"denom"`
+		Representations     []struct {
+			Decimals int    `json:"decimals"`
+			Symbol   string `json:"symbol"`
+			Denom    string `json:"denom"`
+		} `json:"representations"`
+		UniversalChainID    string `json:"universal_chain_id"`
+	} `json:"quote_token_meta"`
 	SortOrder              string    `json:"sort_order"`
 	IsTestnetTransfer      bool      `json:"isTestnetTransfer"`
 	SourceDisplayName      string    `json:"sourceDisplayName"`
 	DestinationDisplayName string    `json:"destinationDisplayName"`
 	FormattedTimestamp     string    `json:"formattedTimestamp"`
 	RouteKey               string    `json:"routeKey"`
-	SenderDisplay          string    `json:"senderDisplay"`
-	ReceiverDisplay        string    `json:"receiverDisplay"`
 }
 
 // BroadcastTransfer represents a transfer structure for broadcasting

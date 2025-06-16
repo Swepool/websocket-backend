@@ -18,8 +18,14 @@ type Config struct {
 	TransferAgeThreshold time.Duration // Max age of transfers to broadcast in real-time (older ones stored but not shown)
 	
 	// Stats broadcasting configuration
-	StatsBroadcastInterval time.Duration // Interval for broadcasting stats/charts (5-10s recommended)
+	StatsBroadcastInterval time.Duration // Interval for broadcasting stats/charts (15s recommended)
 	EnableStatsDeduplication bool        // Enable deduplication of unchanged stats data
+	
+	// Stats data limits for broadcasting
+	TopItemsLimit        int // Number of top items to return for routes, senders, receivers (chart data)
+	TopItemsTimeScale    int // Number of top items to return for time scale data
+	MaxWalletsInBroadcast int // Maximum number of wallets to include in broadcast (0 = unlimited)
+	MaxAssetsInBroadcast  int // Maximum number of assets to include in broadcast (0 = unlimited)
 }
 
 // New creates a new Config instance with hardcoded values
@@ -37,8 +43,15 @@ func New() *Config {
 		TransferAgeThreshold: 1 * time.Minute,  // Only broadcast transfers younger than 1 minute
 		
 		// Stats broadcasting configuration
-		StatsBroadcastInterval: 7 * time.Second, // Broadcast every 7 seconds (5-10s range)
-		EnableStatsDeduplication: true,          // Enable deduplication by default to reduce bandwidth
+		// Common values: 5*time.Second (very fast), 15*time.Second (fast), 30*time.Second (balanced), 60*time.Second (slow)
+		StatsBroadcastInterval: 15 * time.Second, // Broadcast every 15 seconds
+		EnableStatsDeduplication: true,           // Enable deduplication by default to reduce bandwidth
+		
+		// Stats data limits for broadcasting
+		TopItemsLimit:        10,  // Return top 10 items for chart data (routes, senders, receivers)
+		TopItemsTimeScale:    10,  // Return top 10 items for time scale data
+		MaxWalletsInBroadcast: 10, // Limit to top 50 wallets in broadcast (0 = unlimited)
+		MaxAssetsInBroadcast:  10, // Limit to top 20 assets in broadcast (0 = unlimited)
 	}
 	
 	

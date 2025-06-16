@@ -112,7 +112,13 @@ func NewServer(cfg *config.Config, gql *graphql.Client) *Server {
 	}
 	
 	// Initialize stats collector and server state
-	var statsCollector *stats.EnhancedCollector = stats.NewEnhancedCollector()
+	statsConfig := stats.StatsConfig{
+		TopItemsLimit:        cfg.TopItemsLimit,
+		TopItemsTimeScale:    cfg.TopItemsTimeScale,
+		MaxWalletsInBroadcast: cfg.MaxWalletsInBroadcast,
+		MaxAssetsInBroadcast:  cfg.MaxAssetsInBroadcast,
+	}
+	var statsCollector *stats.EnhancedCollector = stats.NewEnhancedCollector(statsConfig)
 	var lastSortOrder string = cfg.LastSortOrder
 	var isInitialFetch bool = cfg.LastSortOrder == ""
 	
@@ -587,7 +593,7 @@ func (s *Server) getChartData() interface{} {
 	
 	// Safe type assertion to EnhancedCollector
 	if enhancedCollector, ok := s.statsCollector.(*stats.EnhancedCollector); ok {
-		return enhancedCollector.GetEnhancedChartData()
+		return enhancedCollector.GetBroadcastData()
 	} else {
 		s.logger.Error("Stats collector is not an EnhancedCollector", map[string]interface{}{
 			"actualType": fmt.Sprintf("%T", s.statsCollector),
