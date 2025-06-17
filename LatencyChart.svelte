@@ -1,62 +1,103 @@
-<script>
-// Simple latency chart component for displaying chain-to-chain latency data
-
-export let latencyData = []
-
-// Local configuration
-const metricTypes = [
-  { key: "packetRecv", label: "Packet Recv", description: "Time until packet received" },
-  { key: "writeAck", label: "Write Ack", description: "Time until write acknowledgment" },
-  { key: "packetAck", label: "Packet Ack", description: "Time until packet acknowledgment" },
-]
-
-const percentileTypes = [
-  { key: "median", label: "Median", description: "50th percentile" },
-  { key: "p95", label: "P95", description: "95th percentile" },
-  { key: "p5", label: "P5", description: "5th percentile" },
-]
-
-// State management
-let selectedMetric = "packetRecv"
-let selectedPercentile = "median"
-
-// Computed values
-$: currentData = latencyData && latencyData.length > 0 
-  ? latencyData
-      .map(item => ({
-        ...item,
-        latencyValue: item[selectedMetric] && item[selectedMetric][selectedPercentile] || 0
-      }))
-      .sort((a, b) => a.latencyValue - b.latencyValue) // Sort by latency (lowest first)
-      .slice(0, 10) // Show top 10
-  : []
-
-$: hasData = currentData.length > 0
-$: isLoading = !hasData && (!latencyData || latencyData.length === 0)
-$: maxLatency = currentData.length > 0 ? Math.max(...currentData.map(item => item.latencyValue)) : 1
-
-// Utility functions
-function formatLatency(seconds) {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`
-  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`
-  return `${(seconds / 3600).toFixed(1)}h`
-}
-
-function formatChainName(name) {
-  return name ? name.toLowerCase().replace(/\s+/g, "_") : "unknown"
-}
-
-function getLatencyColor(latency) {
-  if (latency < 30) return "text-green-400"
-  if (latency < 120) return "text-yellow-400"
-  return "text-red-400"
-}
-
-function getProgressColor(latency) {
-  if (latency < 30) return "bg-green-500"
-  if (latency < 120) return "bg-yellow-500"
-  return "bg-red-500"
-}
+<script lang="ts">
+    // Waterfall latency chart - shows sequential IBC packet latency stages
+    
+    let { latencyData = [] } = $props()
+    
+    // State management for filtering
+    let selectedSource = $state("all")
+    let selectedDestination = $state("all")
+    
+    // Computed values - Extract unique chains
+    const allSources = $derived(latencyData && latencyData.length > 0
+      ? [...new Set(latencyData.map(item => item.sourceName).filter(Boolean))].sort()
+      : [])
+    
+    const allDestinations = $derived(latencyData && latencyData.length > 0
+      ? [...new Set(latencyData.map(item => item.destinationName).filter(Boolean))].sort()
+      : [])
+    
+    const currentData = $derived(latencyData && latencyData.length > 0 
+      ? latencyData
+          .filter(item => 
+            item.packetRecv && item.writeAck && item.packetAck &&
+            item.packetRecv.median !== undefined && 
+            item.writeAck.median !== undefined && 
+            item.packetAck.median !== undefined)
+          .filter(item => selectedSource === "all" || item.sourceName === selectedSource)
+          .filter(item => selectedDestination === "all" || item.destinationName === selectedDestination)
+          .map(item => {
+            // The raw data represents cumulative times from start
+            // packetRecv: time until packet received  
+            // writeAck: time until write acknowledgment (cumulative)
+            // packetAck: time until packet acknowledgment (total end-to-end time)
+            
+            const totalLatency = {
+              p5: item.packetAck.p5,
+              median: item.packetAck.median,
+              p95: item.packetAck.p95
+            }
+            
+            // For proper waterfall stacking, calculate individual stage durations
+            const stages = {
+              packetRecv: {
+                // Stage 1: 0 to packetRecv time
+                p5: item.packetRecv.p5,
+                median: item.packetRecv.median,
+                p95: item.packetRecv.p95
+              },
+              writeAck: {
+                // Stage 2: packetRecv to writeAck time (duration of writeAck stage)
+                p5: Math.max(0, item.writeAck.p5 - item.packetRecv.p5),
+                median: Math.max(0, item.writeAck.median - item.packetRecv.median),
+                p95: Math.max(0, item.writeAck.p95 - item.packetRecv.p95)
+              },
+              packetAck: {
+                // Stage 3: writeAck to packetAck time (duration of final ack stage)
+                p5: Math.max(0, item.packetAck.p5 - item.writeAck.p5),
+                median: Math.max(0, item.packetAck.median - item.writeAck.median),
+                p95: Math.max(0, item.packetAck.p95 - item.writeAck.p95)
+              }
+            }
+            
+            return {
+              ...item,
+              totalLatency,
+              stages
+            }
+          })
+          .sort((a, b) => a.totalLatency.median - b.totalLatency.median) // Sort by total median latency
+          .slice(0, 12) // Show top 12 for good visibility
+      : [])
+    
+    const hasData = $derived(currentData.length > 0)
+    const isLoading = $derived(!hasData && (!latencyData || latencyData.length === 0))
+    
+    // Calculate scale for waterfall chart
+    const dataMaxLatency = $derived(currentData.length > 0 ? Math.max(...currentData.map(item => item.totalLatency.p95)) : 100)
+    const dataMinLatency = $derived(0) // Start from 0 for waterfall
+    
+    // Add padding and use nice bounds
+    const minLatency = $derived(0)
+    const maxLatency = $derived(dataMaxLatency * 1.1) // 10% padding above
+    
+    const sqrtMaxLatency = $derived(Math.sqrt(maxLatency))
+    const sqrtMinLatency = $derived(Math.sqrt(minLatency))
+    const sqrtLatencyRange = $derived(sqrtMaxLatency - sqrtMinLatency || 1)
+    
+    // Utility functions
+    function formatLatency(seconds) {
+      if (seconds < 60) return `${seconds.toFixed(1)}s`
+      if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`
+      return `${(seconds / 3600).toFixed(1)}h`
+    }
+    
+    function formatChainName(name) {
+      return name ? name.toLowerCase().replace(/\s+/g, "_") : "unknown"
+    }
+    
+    function getPosition(value) {
+      return ((Math.sqrt(value) - sqrtMinLatency) / sqrtLatencyRange) * 100
+    }
 </script>
 
 <div class="h-full p-0 bg-zinc-950 border border-zinc-800 rounded">
@@ -65,9 +106,14 @@ function getProgressColor(latency) {
     <header class="flex items-center justify-between p-2 border-b border-zinc-800">
       <div class="flex items-center space-x-2">
         <span class="text-zinc-500 text-xs">$</span>
-        <h3 class="text-xs text-zinc-300 font-semibold">latency-stats</h3>
-        <span class="text-zinc-600 text-xs">--metric={selectedMetric}</span>
-        <span class="text-zinc-600 text-xs">--percentile={selectedPercentile}</span>
+        <h3 class="text-xs text-zinc-300 font-semibold">latency-waterfall</h3>
+        <span class="text-zinc-600 text-xs">--stages=all</span>
+        {#if selectedSource !== "all"}
+          <span class="text-zinc-600 text-xs">--source={formatChainName(selectedSource)}</span>
+        {/if}
+        {#if selectedDestination !== "all"}
+          <span class="text-zinc-600 text-xs">--dest={formatChainName(selectedDestination)}</span>
+        {/if}
       </div>
       <div class="text-xs text-zinc-500">
         {#if isLoading}
@@ -80,73 +126,88 @@ function getProgressColor(latency) {
 
     <!-- Controls -->
     <div class="pt-2 px-2">
-      <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-1 mb-1">
-        <!-- Metric Selector -->
-        <div class="flex flex-wrap gap-0.5">
-          <span class="text-zinc-600 text-xs font-mono mr-1">metric:</span>
-          {#each metricTypes as metric}
-            <button
-              class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
-                selectedMetric === metric.key
-                  ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
-              }"
-              on:click={() => selectedMetric = metric.key}
-              title={metric.description}
-            >
-              {metric.label}
-            </button>
-          {/each}
+      <!-- Filters -->
+      <div class="flex flex-col sm:flex-row gap-2 mb-2">
+        <!-- Source Filter -->
+        <div class="flex items-center gap-1">
+          <span class="text-zinc-600 text-xs font-mono">source:</span>
+          <select 
+            bind:value={selectedSource}
+            class="px-2 py-1 text-xs font-mono bg-zinc-900 border border-zinc-700 text-zinc-300 hover:border-zinc-600 focus:border-zinc-500 focus:outline-none transition-colors"
+          >
+            <option value="all">all</option>
+            {#each allSources as source}
+              <option value={source}>{formatChainName(source)}</option>
+            {/each}
+          </select>
         </div>
-
-        <!-- Percentile Selector -->
-        <div class="flex items-center gap-0.5">
-          <span class="text-zinc-600 text-xs font-mono">percentile:</span>
-          {#each percentileTypes as percentile}
-            <button
-              class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
-                selectedPercentile === percentile.key
-                  ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
-              }"
-              on:click={() => selectedPercentile = percentile.key}
-              title={percentile.description}
-            >
-              {percentile.label}
-            </button>
-          {/each}
+        
+        <!-- Destination Filter -->
+        <div class="flex items-center gap-1">
+          <span class="text-zinc-600 text-xs font-mono">destination:</span>
+          <select 
+            bind:value={selectedDestination}
+            class="px-2 py-1 text-xs font-mono bg-zinc-900 border border-zinc-700 text-zinc-300 hover:border-zinc-600 focus:border-zinc-500 focus:outline-none transition-colors"
+          >
+            <option value="all">all</option>
+            {#each allDestinations as destination}
+              <option value={destination}>{formatChainName(destination)}</option>
+            {/each}
+          </select>
+        </div>
+        
+        <!-- Clear Filters -->
+        {#if selectedSource !== "all" || selectedDestination !== "all"}
+          <button
+            class="px-2 py-1 text-xs font-mono border border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300 transition-colors"
+            on:click={() => { selectedSource = "all"; selectedDestination = "all"; }}
+            title="Clear all filters"
+          >
+            clear
+          </button>
+        {/if}
+      </div>
+      
+      <!-- Legend -->
+      <div class="flex items-center gap-4 text-xs text-zinc-500 mb-1">
+        <div class="flex items-center gap-1">
+          <div class="w-3 h-2 bg-blue-600"></div>
+          <span>Packet Recv</span>
+        </div>
+        <div class="flex items-center gap-1">
+          <div class="w-3 h-2 bg-yellow-600"></div>
+          <span>Write Ack</span>
+        </div>
+        <div class="flex items-center gap-1">
+          <div class="w-3 h-2 bg-green-600"></div>
+          <span>Packet Ack</span>
+        </div>
+        <div class="flex items-center gap-1">
+          <div class="w-1 h-3 bg-zinc-300"></div>
+          <span>P5/P95 Range</span>
         </div>
       </div>
     </div>
 
-    <!-- Latency List -->
-    <main class="flex-1 flex flex-col p-2">
-      <div class="text-xs text-zinc-500 font-mono font-medium mb-1">
-        chain_latencies:
+    <!-- Waterfall Chart -->
+    <main class="flex-1 flex flex-col p-2 min-h-0">
+      <div class="text-xs text-zinc-500 font-mono font-medium mb-2">
+        waterfall_latency: {currentData.length} routes
+        {#if selectedSource !== "all" || selectedDestination !== "all"}
+          <span class="text-zinc-600">
+            (filtered from {latencyData?.length || 0} total)
+          </span>
+        {/if}
       </div>
 
-      <div class="flex-1 flex flex-col">
+      <div class="flex-1 overflow-y-auto">
         {#if isLoading}
           <!-- Loading State -->
-          <div class="space-y-0.5 flex-1">
-            {#each Array(10) as _, index}
-              <div class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
-                <div class="flex items-center justify-between mb-0.5">
-                  <div class="flex items-center space-x-1 text-xs">
-                    <div class="w-2 h-2 bg-zinc-700 rounded animate-pulse"></div>
-                    <div class="w-12 h-2 bg-zinc-700 rounded animate-pulse"></div>
-                    <span class="text-zinc-600 text-xs">→</span>
-                    <div class="w-12 h-2 bg-zinc-700 rounded animate-pulse"></div>
-                  </div>
-                  <div class="flex items-center space-x-1">
-                    <div class="w-8 h-2 bg-zinc-700 rounded animate-pulse"></div>
-                  </div>
-                </div>
-                <div class="flex items-center space-x-2">
-                  <div class="flex-1 flex min-w-0">
-                    <div class="w-full h-1 bg-zinc-700 rounded animate-pulse"></div>
-                  </div>
-                </div>
+          <div class="space-y-3">
+            {#each Array(8) as _, index}
+              <div class="flex items-center gap-3">
+                <div class="w-32 h-3 bg-zinc-700 rounded animate-pulse"></div>
+                <div class="flex-1 h-8 bg-zinc-800 rounded animate-pulse"></div>
               </div>
             {/each}
           </div>
@@ -154,73 +215,158 @@ function getProgressColor(latency) {
           <!-- No Data State -->
           <div class="flex-1 flex items-center justify-center">
             <div class="text-center">
-              <div class="text-zinc-600 font-mono">no_data</div>
+              <div class="text-zinc-600 font-mono">no_latency_data</div>
+              <div class="text-zinc-700 text-xs mt-1">waiting for api fix...</div>
             </div>
           </div>
         {:else}
-          <!-- Latency Data -->
-          <div class="space-y-1 flex-1 overflow-y-auto">
+          <!-- Waterfall Data -->
+          <div class="space-y-3">
             {#each currentData as item, index}
-              <article class="p-2 sm:p-1.5 bg-zinc-900 border border-zinc-800 rounded">
-                <!-- Route Header -->
-                <div class="flex items-center justify-between mb-0.5">
-                  <div class="flex items-center space-x-1 text-xs">
-                    <span class="text-zinc-500">#{index + 1}</span>
-                    <span class="text-zinc-300 font-medium">
+              <!-- Mobile: Stacked Layout -->
+              <div class="flex flex-col sm:hidden group">
+                <!-- Top row: Route name and total time -->
+                <div class="flex justify-between items-start mb-1">
+                  <div class="text-xs text-zinc-300 truncate flex-shrink-0">
+                    <div class="font-medium">
                       {formatChainName(item.sourceName)}
-                    </span>
-                    <span class="text-zinc-600">→</span>
-                    <span class="text-zinc-300 font-medium">
-                      {formatChainName(item.destinationName)}
-                    </span>
-                  </div>
-                  <div class="flex items-center space-x-1">
-                    <span class="text-xs tabular-nums font-medium {getLatencyColor(item.latencyValue)}">
-                      {formatLatency(item.latencyValue)}
-                    </span>
-                  </div>
-                </div>
-
-                <!-- Progress Bar -->
-                <div class="flex items-center space-x-2">
-                  <div class="flex-1 flex min-w-0">
-                    <!-- Desktop: Thinner bar -->
-                    <div class="hidden sm:flex w-full h-1">
-                      <div 
-                        class="h-full transition-all duration-300 {getProgressColor(item.latencyValue)}"
-                        style="width: {(item.latencyValue / maxLatency) * 100}%"
-                        title="Latency: {formatLatency(item.latencyValue)}"
-                      ></div>
-                      <div 
-                        class="bg-zinc-800 h-full transition-all duration-300"
-                        style="width: {100 - (item.latencyValue / maxLatency) * 100}%"
-                      ></div>
                     </div>
-                    <!-- Mobile: Thicker bar for better visibility -->
-                    <div class="flex sm:hidden w-full h-1.5">
-                      <div 
-                        class="h-full transition-all duration-300 {getProgressColor(item.latencyValue)}"
-                        style="width: {(item.latencyValue / maxLatency) * 100}%"
-                        title="Latency: {formatLatency(item.latencyValue)}"
-                      ></div>
-                      <div 
-                        class="bg-zinc-800 h-full transition-all duration-300"
-                        style="width: {100 - (item.latencyValue / maxLatency) * 100}%"
-                      ></div>
+                    <div class="text-zinc-500 text-[10px]">
+                      → {formatChainName(item.destinationName)}
+                    </div>
+                  </div>
+                  
+                  <div class="text-xs text-zinc-400 flex-shrink-0 tabular-nums text-right">
+                    <div class="font-medium">
+                      {formatLatency(item.totalLatency.median)}
+                    </div>
+                    <div class="text-[10px] text-zinc-600">
+                      {formatLatency(item.totalLatency.p5)}-{formatLatency(item.totalLatency.p95)}
                     </div>
                   </div>
                 </div>
-
-                <!-- Additional Metrics -->
-                {#if item.packetRecv}
-                <div class="mt-1 text-xs text-zinc-500">
-                  <span class="mr-2">P5: {formatLatency(item.packetRecv.p5 || 0)}</span>
-                  <span class="mr-2">Median: {formatLatency(item.packetRecv.median || 0)}</span>
-                  <span>P95: {formatLatency(item.packetRecv.p95 || 0)}</span>
+                
+                <!-- Bottom row: Waterfall chart -->
+                <div class="relative h-8 bg-zinc-900 rounded border border-zinc-800 group-hover:border-zinc-600 transition-colors"
+                     title="Route: {item.sourceName} → {item.destinationName}&#10;Total: {formatLatency(item.totalLatency.median)} ({formatLatency(item.totalLatency.p5)}-{formatLatency(item.totalLatency.p95)})&#10;Recv: {formatLatency(item.stages.packetRecv.median)}&#10;WriteAck: {formatLatency(item.stages.writeAck.median)}&#10;PacketAck: {formatLatency(item.stages.packetAck.median)}">
+                  
+                  <!-- Packet Recv Stage -->
+                  <div 
+                    class="absolute h-6 top-1 bg-blue-600 group-hover:bg-blue-500 transition-colors"
+                    style="
+                      left: 0%; 
+                      width: {getPosition(item.stages.packetRecv.median).toFixed(1)}%;
+                    "
+                  ></div>
+                  
+                  <!-- Write Ack Stage -->
+                  <div 
+                    class="absolute h-6 top-1 bg-yellow-600 group-hover:bg-yellow-500 transition-colors"
+                    style="
+                      left: {getPosition(item.stages.packetRecv.median).toFixed(1)}%; 
+                      width: {getPosition(item.stages.writeAck.median).toFixed(1)}%;
+                    "
+                  ></div>
+                  
+                  <!-- Packet Ack Stage -->
+                  <div 
+                    class="absolute h-6 top-1 bg-green-600 group-hover:bg-green-500 transition-colors"
+                    style="
+                      left: {(getPosition(item.stages.packetRecv.median) + getPosition(item.stages.writeAck.median)).toFixed(1)}%; 
+                      width: {getPosition(item.stages.packetAck.median).toFixed(1)}%;
+                    "
+                  ></div>
+                  
+                  <!-- P5 Range Marker -->
+                  <div 
+                    class="absolute w-0.5 h-8 top-0 bg-zinc-300 opacity-70"
+                    style="left: {getPosition(item.totalLatency.p5).toFixed(1)}%"
+                  ></div>
+                  
+                  <!-- P95 Range Marker -->
+                  <div 
+                    class="absolute w-0.5 h-8 top-0 bg-zinc-300 opacity-70"
+                    style="left: {getPosition(item.totalLatency.p95).toFixed(1)}%"
+                  ></div>
                 </div>
-                {/if}
-              </article>
+              </div>
+
+              <!-- Desktop: Horizontal Layout -->
+              <div class="hidden sm:flex items-center gap-3 group">
+                <!-- Route Label -->
+                <div class="w-32 text-xs text-zinc-300 truncate flex-shrink-0">
+                  <div class="font-medium">
+                    {formatChainName(item.sourceName)}
+                  </div>
+                  <div class="text-zinc-500 text-[10px]">
+                    → {formatChainName(item.destinationName)}
+                  </div>
+                </div>
+
+                <!-- Waterfall Chart Container -->
+                <div class="flex-1 relative h-8 bg-zinc-900 rounded border border-zinc-800 group-hover:border-zinc-600 transition-colors"
+                     title="Route: {item.sourceName} → {item.destinationName}&#10;Total: {formatLatency(item.totalLatency.median)} ({formatLatency(item.totalLatency.p5)}-{formatLatency(item.totalLatency.p95)})&#10;Recv: {formatLatency(item.stages.packetRecv.median)}&#10;WriteAck: {formatLatency(item.stages.writeAck.median)}&#10;PacketAck: {formatLatency(item.stages.packetAck.median)}">
+                  
+                  <!-- Packet Recv Stage -->
+                  <div 
+                    class="absolute h-6 top-1 bg-blue-600 group-hover:bg-blue-500 transition-colors rounded-l"
+                    style="
+                      left: 0%; 
+                      width: {getPosition(item.stages.packetRecv.median).toFixed(1)}%;
+                    "
+                  ></div>
+                  
+                  <!-- Write Ack Stage -->
+                  <div 
+                    class="absolute h-6 top-1 bg-yellow-600 group-hover:bg-yellow-500 transition-colors"
+                    style="
+                      left: {getPosition(item.stages.packetRecv.median).toFixed(1)}%; 
+                      width: {getPosition(item.stages.writeAck.median).toFixed(1)}%;
+                    "
+                  ></div>
+                  
+                  <!-- Packet Ack Stage -->
+                  <div 
+                    class="absolute h-6 top-1 bg-green-600 group-hover:bg-green-500 transition-colors rounded-r"
+                    style="
+                      left: {(getPosition(item.stages.packetRecv.median) + getPosition(item.stages.writeAck.median)).toFixed(1)}%; 
+                      width: {getPosition(item.stages.packetAck.median).toFixed(1)}%;
+                    "
+                  ></div>
+                  
+                  <!-- P5 Range Marker -->
+                  <div 
+                    class="absolute w-0.5 h-8 top-0 bg-zinc-300 opacity-70"
+                    style="left: {getPosition(item.totalLatency.p5).toFixed(1)}%"
+                  ></div>
+                  
+                  <!-- P95 Range Marker -->
+                  <div 
+                    class="absolute w-0.5 h-8 top-0 bg-zinc-300 opacity-70"
+                    style="left: {getPosition(item.totalLatency.p95).toFixed(1)}%"
+                  ></div>
+                </div>
+
+                <!-- Total Latency Values -->
+                <div class="w-20 text-xs text-zinc-400 flex-shrink-0 tabular-nums">
+                  <div class="font-medium">
+                    {formatLatency(item.totalLatency.median)}
+                  </div>
+                  <div class="text-[10px] text-zinc-600">
+                    {formatLatency(item.totalLatency.p5)}-{formatLatency(item.totalLatency.p95)}
+                  </div>
+                </div>
+              </div>
             {/each}
+          </div>
+
+          <!-- Scale Labels -->
+          <div class="mt-4 pt-2 border-t border-zinc-800">
+            <div class="flex justify-between text-xs text-zinc-600">
+              <span>0s</span>
+              <span class="text-zinc-500">total latency scale (√)</span>
+              <span>{formatLatency(maxLatency)}</span>
+            </div>
           </div>
         {/if}
       </div>
@@ -229,21 +375,22 @@ function getProgressColor(latency) {
 </div>
 
 <style>
-  /* Custom scrollbar styling */
-  .overflow-y-auto::-webkit-scrollbar {
-    width: 4px;
-  }
-  
-  .overflow-y-auto::-webkit-scrollbar-track {
-    background: #27272a;
-  }
-  
-  .overflow-y-auto::-webkit-scrollbar-thumb {
-    background: #52525b;
-    border-radius: 2px;
-  }
-  
-  .overflow-y-auto::-webkit-scrollbar-thumb:hover {
-    background: #71717a;
-  }
-</style> 
+/* Custom scrollbar styling */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 4px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: #27272a;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: #52525b;
+  border-radius: 2px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: #71717a;
+}
+</style>
+    

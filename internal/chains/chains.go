@@ -128,7 +128,19 @@ func (s *Service) FetchLatencyData(ctx context.Context) ([]models.LatencyData, e
 				continue // Skip same chain
 			}
 			
-			latency, err := s.graphql.FetchLatency(ctx, sourceChain.UniversalChainID, destChain.UniversalChainID)
+			// Check context cancellation before each request
+			select {
+			case <-ctx.Done():
+				fmt.Printf("[CHAINS] Context cancelled, stopping latency fetch\n")
+				return latencyData, nil
+			default:
+			}
+			
+			// Use shorter timeout for individual requests to staging endpoint
+			latencyCtx, latencyCancel := context.WithTimeout(ctx, 5*time.Second)
+			latency, err := s.graphql.FetchLatency(latencyCtx, sourceChain.UniversalChainID, destChain.UniversalChainID)
+			latencyCancel()
+			
 			if err != nil {
 				errorCount++
 				// Log error but continue with other pairs
@@ -205,12 +217,19 @@ func (s *Service) refreshLatencyData(ctx context.Context) {
 		return // No callback set, skip latency fetch
 	}
 	
-	latencyData, err := s.FetchLatencyData(ctx)
-	if err != nil {
-		fmt.Printf("[CHAINS] Failed to fetch latency data: %v\n", err)
-		return
-	}
-	
-	// Call the callback to update latency data
-	s.latencyCallback(latencyData)
+	// Run latency fetching in background so it doesn't block shutdown
+	go func() {
+		// Add timeout for staging endpoint but don't block main thread
+		latencyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		
+		latencyData, err := s.FetchLatencyData(latencyCtx)
+		if err != nil {
+			fmt.Printf("[CHAINS] Failed to fetch latency data: %v\n", err)
+			return
+		}
+		
+		// Call the callback to update latency data
+		s.latencyCallback(latencyData)
+	}()
 } 
