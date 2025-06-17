@@ -4,12 +4,15 @@ import "time"
 
 // ChartData represents aggregated chart data for frontend
 type ChartData struct {
-	TransferRates    []TransferRate    `json:"transferRates"`
-	PopularRoutes    []PopularRoute    `json:"popularRoutes"`
-	ActiveSenders    []ActiveSender    `json:"activeSenders"`
-	ActiveReceivers  []ActiveReceiver  `json:"activeReceivers"`
-	TopAssets        []TopAsset        `json:"topAssets"`
-	LastUpdated      time.Time         `json:"lastUpdated"`
+	Timestamp         time.Time   `json:"timestamp"`
+	TotalTransfers    int64       `json:"totalTransfers"`
+	TransferRates     interface{} `json:"transferRates"`
+	TopRoutes         interface{} `json:"topRoutes"`
+	ChainFlows        interface{} `json:"chainFlows"`
+	TopAssets         interface{} `json:"topAssets"`
+	ActiveWallets     interface{} `json:"activeWallets"`
+	NetworkStats      interface{} `json:"networkStats"`
+	LastUpdated       time.Time   `json:"lastUpdated"`
 }
 
 // TransferRate represents transfer rate over time
@@ -51,4 +54,22 @@ type TopAsset struct {
 type StatsUpdate struct {
 	Transfers []Transfer `json:"transfers"`
 	Timestamp time.Time  `json:"timestamp"`
+}
+
+// LatencyData represents latency statistics between chain pairs
+type LatencyData struct {
+	SourceChain      string       `json:"sourceChain"`
+	DestinationChain string       `json:"destinationChain"`
+	SourceName       string       `json:"sourceName"`
+	DestinationName  string       `json:"destinationName"`
+	PacketAck        LatencyStats `json:"packetAck"`
+	PacketRecv       LatencyStats `json:"packetRecv"`
+	WriteAck         LatencyStats `json:"writeAck"`
+}
+
+// LatencyStats represents latency percentiles
+type LatencyStats struct {
+	P5     float64 `json:"p5"`
+	Median float64 `json:"median"`
+	P95    float64 `json:"p95"`
 } 

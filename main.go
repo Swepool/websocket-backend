@@ -12,6 +12,7 @@ import (
 	"websocket-backend-new/internal/pipeline"
 	"websocket-backend-new/internal/server"
 	"websocket-backend-new/internal/chains"
+	"websocket-backend-new/models"
 )
 
 func main() {
@@ -46,6 +47,12 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("Pipeline coordinator created\n")
+	
+	// Set up latency callback to update stats collector
+	chainsService.SetLatencyCallback(func(latencyData []models.LatencyData) {
+		coordinator.GetStatsCollector().UpdateLatencyData(latencyData)
+		fmt.Printf("Updated latency data with %d chain pairs\n", len(latencyData))
+	})
 	
 	// Create server with coordinator and chains service
 	srv := server.NewServer(coordinator, chainsService)

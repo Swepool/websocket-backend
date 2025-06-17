@@ -206,6 +206,13 @@ func (b *Broadcaster) broadcastTransfer(transfer models.Transfer) {
 	// Send to all clients asynchronously
 	for _, client := range clients {
 		go func(c *Client) {
+			defer func() {
+				if r := recover(); r != nil {
+					// Channel was closed, unregister the client
+					b.unregister <- c
+				}
+			}()
+			
 			select {
 			case c.send <- data:
 			default:
@@ -240,6 +247,13 @@ func (b *Broadcaster) broadcastChartData(rawData interface{}) {
 	// Send to all clients asynchronously
 	for _, client := range clients {
 		go func(c *Client) {
+			defer func() {
+				if r := recover(); r != nil {
+					// Channel was closed, unregister the client
+					b.unregister <- c
+				}
+			}()
+			
 			select {
 			case c.send <- data:
 			default:
@@ -272,8 +286,8 @@ func (b *Broadcaster) broadcastStats(stats interface{}) {
 		select {
 		case client.send <- data:
 		default:
-			close(client.send)
-			delete(b.clients, client)
+			// Client's send channel is full, unregister via proper channel
+			b.unregister <- client
 		}
 	}
 }

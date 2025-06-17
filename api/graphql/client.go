@@ -123,6 +123,31 @@ const (
 			}
 		}
 	`
+
+	latencyQuery = `
+		query LatencyStats($sourceChainId: String!, $destinationChainId: String!) {
+			v2_stats_latency(args: {
+				p_source_universal_chain_id: $sourceChainId,
+				p_destination_universal_chain_id: $destinationChainId
+			}) {
+				secs_until_packet_ack {
+					p5
+					median
+					p95
+				}
+				secs_until_packet_recv {
+					p5
+					median
+					p95
+				}
+				secs_until_write_ack {
+					p5
+					median
+					p95
+				}
+			}
+		}
+	`
 )
 
 // GraphQL request/response structures
@@ -133,8 +158,9 @@ type GraphQLRequest struct {
 
 type GraphQLResponse struct {
 	Data struct {
-		V2Transfers []RawTransfer `json:"v2_transfers"`
-		V2Chains    []RawChain    `json:"v2_chains"`
+		V2Transfers  []RawTransfer  `json:"v2_transfers"`
+		V2Chains     []RawChain     `json:"v2_chains"`
+		V2StatsLatency []RawLatency `json:"v2_stats_latency"`
 	} `json:"data"`
 	Errors []struct {
 		Message string `json:"message"`
@@ -165,6 +191,18 @@ type RawChain struct {
 	Testnet          bool   `json:"testnet"`
 	RpcType          string `json:"rpc_type"`
 	AddrPrefix       string `json:"addr_prefix"`
+}
+
+type RawLatency struct {
+	SecsUntilPacketAck  LatencyStats `json:"secs_until_packet_ack"`
+	SecsUntilPacketRecv LatencyStats `json:"secs_until_packet_recv"`
+	SecsUntilWriteAck   LatencyStats `json:"secs_until_write_ack"`
+}
+
+type LatencyStats struct {
+	P5     float64 `json:"p5"`
+	Median float64 `json:"median"`
+	P95    float64 `json:"p95"`
 }
 
 // Convert raw transfer to model
@@ -253,6 +291,49 @@ func (c *Client) FetchChains(ctx context.Context) ([]models.Chain, error) {
 	}
 	
 	return chains, nil
+}
+
+// FetchLatency fetches latency statistics for a specific chain pair
+func (c *Client) FetchLatency(ctx context.Context, sourceChainID, destinationChainID string) (*models.LatencyData, error) {
+	variables := map[string]interface{}{
+		"sourceChainId":      sourceChainID,
+		"destinationChainId": destinationChainID,
+	}
+	
+	result, err := c.executeQuery(ctx, latencyQuery, variables)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Check if we have latency data
+	if len(result.Data.V2StatsLatency) == 0 {
+		return nil, nil // No latency data available for this chain pair
+	}
+	
+	rawLatency := result.Data.V2StatsLatency[0]
+	
+	// Convert to model
+	latencyData := &models.LatencyData{
+		SourceChain:      sourceChainID,
+		DestinationChain: destinationChainID,
+		PacketAck: models.LatencyStats{
+			P5:     rawLatency.SecsUntilPacketAck.P5,
+			Median: rawLatency.SecsUntilPacketAck.Median,
+			P95:    rawLatency.SecsUntilPacketAck.P95,
+		},
+		PacketRecv: models.LatencyStats{
+			P5:     rawLatency.SecsUntilPacketRecv.P5,
+			Median: rawLatency.SecsUntilPacketRecv.Median,
+			P95:    rawLatency.SecsUntilPacketRecv.P95,
+		},
+		WriteAck: models.LatencyStats{
+			P5:     rawLatency.SecsUntilWriteAck.P5,
+			Median: rawLatency.SecsUntilWriteAck.Median,
+			P95:    rawLatency.SecsUntilWriteAck.P95,
+		},
+	}
+	
+	return latencyData, nil
 }
 
 // executeQuery executes a GraphQL query

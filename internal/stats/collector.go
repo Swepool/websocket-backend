@@ -102,6 +102,9 @@ type Collector struct {
 	addressFormatter *utils.AddressFormatter
 	addressChainInfo map[string]*AddressChainInfo // address -> chain info for formatting
 	
+	// Latency data
+	latencyData []models.LatencyData
+	
 	// Previous period snapshots for percentage calculations
 	previousMinute  *PeriodStats
 	previousHour    *PeriodStats
@@ -818,9 +821,28 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 		},
 		"assetVolumeData": c.getAssetVolumeDataForFrontend(now.Add(-time.Minute), transferRates.Uptime), // Use 1-minute rolling window like other components
 		"dataAvailability": transferRates.DataAvailability, // Top-level data availability for wallet stats
+		"latencyData": c.getLatencyData(), // Add latency data
 	}
 	
 	return frontendData
+}
+
+// UpdateLatencyData updates the stored latency data
+func (c *Collector) UpdateLatencyData(latencyData []models.LatencyData) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.latencyData = latencyData
+}
+
+// getLatencyData returns a copy of the current latency data
+func (c *Collector) getLatencyData() []models.LatencyData {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	
+	// Return a copy to prevent race conditions
+	result := make([]models.LatencyData, len(c.latencyData))
+	copy(result, c.latencyData)
+	return result
 }
 
 // Helper function to parse amount from string
