@@ -1,6 +1,9 @@
 package config
 
 import (
+	"fmt"
+	"os"
+	"strconv"
 	"time"
 	"websocket-backend-new/internal/pipeline"
 	"websocket-backend-new/internal/chains"
@@ -46,7 +49,7 @@ func DefaultConfig() Config {
 		Enhancer:    enhancer.DefaultConfig(),
 		Scheduler:   scheduler.DefaultConfig(),
 		Stats:       stats.DefaultConfig(),
-		Broadcaster: broadcaster.DefaultConfig(),
+		Broadcaster: getDefaultBroadcasterConfig(),
 	}
 }
 
@@ -57,5 +60,127 @@ func DefaultFetcherConfig() fetcher.Config {
 		BatchSize:    100,                    // Larger batches for better throughput
 		MockMode:     false,                   // Use mock data for testing
 		GraphQLURL:   "https://staging.graphql.union.build/v1/graphql",
+	}
+}
+
+// ConfigWithSharding returns configuration optimized for sharded broadcasting
+func ConfigWithSharding(expectedClients int) Config {
+	config := DefaultConfig()
+	
+	// Use recommended sharding configuration
+	config.Broadcaster = broadcaster.GetRecommendedConfig(expectedClients)
+	
+	return config
+}
+
+// HighPerformanceConfig returns configuration for high-load scenarios
+func HighPerformanceConfig() Config {
+	config := DefaultConfig()
+	
+	// High-performance broadcaster settings
+	config.Broadcaster = broadcaster.Config{
+		MaxClients:      2000,
+		BufferSize:      256,
+		DropSlowClients: true,
+		UseSharding:     true,
+		NumShards:       8,
+		WorkersPerShard: 8,
+	}
+	
+	// Optimized fetcher settings
+	config.Fetcher.PollInterval = 500 * time.Millisecond
+	config.Fetcher.BatchSize = 200
+	
+	// Optimized scheduler settings
+	config.Pipeline.Scheduler.MinDelay = 100 * time.Millisecond
+	config.Pipeline.Scheduler.MaxDelay = 1 * time.Second
+	
+	return config
+}
+
+// getDefaultBroadcasterConfig returns broadcaster config with sharding enabled by default
+func getDefaultBroadcasterConfig() broadcaster.Config {
+	config := broadcaster.DefaultConfig()
+	
+	// Enable sharding by default for better performance
+	config.UseSharding = true
+	config.NumShards = 4
+	config.WorkersPerShard = 4
+	config.MaxClients = 1000
+	
+	return config
+}
+
+// DevelopmentConfig returns configuration optimized for development
+func DevelopmentConfig() Config {
+	config := DefaultConfig()
+	
+	// Disable sharding for development (simpler debugging)
+	config.Broadcaster.UseSharding = false
+	
+	// Slower polling for development
+	config.Fetcher.PollInterval = 5 * time.Second
+	config.Fetcher.BatchSize = 50
+	
+	return config
+}
+
+// LoadConfig loads configuration based on environment variables and modes
+func LoadConfig() Config {
+	// Check for configuration mode
+	configMode := "high-performance"
+	
+	switch configMode {
+	case "development":
+		fmt.Printf("Using development configuration\n")
+		return DevelopmentConfig()
+		
+	case "high-performance":
+		fmt.Printf("Using high-performance configuration\n")
+		return HighPerformanceConfig()
+		
+	case "sharded":
+		// Get expected clients from environment
+		expectedClients := 5000 // default
+		if clientsStr := os.Getenv("EXPECTED_CLIENTS"); clientsStr != "" {
+			if parsed, err := strconv.Atoi(clientsStr); err == nil {
+				expectedClients = parsed
+			}
+		}
+		fmt.Printf("Using sharded configuration for %d expected clients\n", expectedClients)
+		return ConfigWithSharding(expectedClients)
+		
+	default:
+		// Check individual environment variables for sharding
+		appConfig := DefaultConfig()
+		
+		if enableSharding := os.Getenv("ENABLE_SHARDING"); enableSharding == "true" {
+			appConfig.Broadcaster.UseSharding = true
+			
+			// Optional: configure shard count
+			if shardsStr := os.Getenv("NUM_SHARDS"); shardsStr != "" {
+				if shards, err := strconv.Atoi(shardsStr); err == nil && shards > 0 {
+					appConfig.Broadcaster.NumShards = shards
+				}
+			}
+			
+			// Optional: configure workers per shard
+			if workersStr := os.Getenv("WORKERS_PER_SHARD"); workersStr != "" {
+				if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
+					appConfig.Broadcaster.WorkersPerShard = workers
+				}
+			}
+			
+			// Optional: configure max clients per shard
+			if clientsStr := os.Getenv("MAX_CLIENTS_PER_SHARD"); clientsStr != "" {
+				if clients, err := strconv.Atoi(clientsStr); err == nil && clients > 0 {
+					appConfig.Broadcaster.MaxClients = clients
+				}
+			}
+			
+			fmt.Printf("Sharding enabled via environment variables\n")
+		}
+		
+		return appConfig
 	}
 } 

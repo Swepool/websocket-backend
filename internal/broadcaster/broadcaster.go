@@ -15,9 +15,12 @@ import (
 
 // Config holds broadcaster configuration
 type Config struct {
-	MaxClients    int  `json:"maxClients"`    // Maximum clients (default: 1000)
-	BufferSize    int  `json:"bufferSize"`    // Buffer size per client (default: 100)
+	MaxClients      int  `json:"maxClients"`      // Maximum clients (default: 1000)
+	BufferSize      int  `json:"bufferSize"`      // Buffer size per client (default: 100)
 	DropSlowClients bool `json:"dropSlowClients"` // Drop slow clients (default: true)
+	UseSharding     bool `json:"useSharding"`     // Enable sharded broadcaster (default: false)
+	NumShards       int  `json:"numShards"`       // Number of shards (default: 4)
+	WorkersPerShard int  `json:"workersPerShard"` // Workers per shard (default: 4)
 }
 
 // DefaultConfig returns default broadcaster configuration
@@ -26,6 +29,9 @@ func DefaultConfig() Config {
 		MaxClients:      1000,
 		BufferSize:      100,
 		DropSlowClients: true,
+		UseSharding:     false, // Default to original implementation
+		NumShards:       4,
+		WorkersPerShard: 4,
 	}
 }
 
@@ -353,6 +359,20 @@ func (c *Client) readPump(unregister chan<- *Client) {
 // GetID returns the client's ID
 func (c *Client) GetID() string {
 	return c.id
+}
+
+// GetType returns the type of broadcaster
+func (b *Broadcaster) GetType() string {
+	return "standard"
+}
+
+// GetShardStats returns shard statistics (empty for standard broadcaster)
+func (b *Broadcaster) GetShardStats() map[string]interface{} {
+	return map[string]interface{}{
+		"sharding_enabled": false,
+		"type": "standard",
+		"total_clients": b.GetClientCount(),
+	}
 }
 
 // generateClientID generates a unique client ID

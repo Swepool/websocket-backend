@@ -22,8 +22,19 @@ func main() {
 	defer cancel()
 	
 	// Load application configuration
-	appConfig := config.DefaultConfig()
+	appConfig := config.LoadConfig()
 	fmt.Printf("Configuration loaded\n")
+	
+	// Print broadcaster configuration
+	fmt.Printf("Broadcaster configuration:\n")
+	fmt.Printf("  Sharding enabled: %v\n", appConfig.Broadcaster.UseSharding)
+	if appConfig.Broadcaster.UseSharding {
+		fmt.Printf("  Number of shards: %d\n", appConfig.Broadcaster.NumShards)
+		fmt.Printf("  Workers per shard: %d\n", appConfig.Broadcaster.WorkersPerShard)
+		fmt.Printf("  Max clients per shard: %d\n", appConfig.Broadcaster.MaxClients)
+		fmt.Printf("  Total capacity: %d clients\n", 
+			appConfig.Broadcaster.NumShards*appConfig.Broadcaster.MaxClients)
+	}
 	
 	// Create chains service first
 	chainsService := chains.NewService(appConfig.Chains)
@@ -87,4 +98,6 @@ func main() {
 	case <-time.After(10 * time.Second):
 		fmt.Printf("Shutdown timeout reached\n")
 	}
-} 
+}
+
+ 

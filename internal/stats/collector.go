@@ -825,16 +825,11 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 
 // Helper function to parse amount from string
 func parseAmount(amountStr string) float64 {
-	// Simple parsing - in real implementation you'd want proper decimal handling
 	var amount float64
 	n, err := fmt.Sscanf(amountStr, "%f", &amount)
 	if err != nil || n != 1 {
-		
 		return 0
 	}
-	
-
-	
 	return amount
 }
 

@@ -36,6 +36,7 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/chains", s.handleChains)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/broadcaster", s.handleBroadcasterStats)
 	
 	// Health check endpoint (for compatibility)
 	mux.HandleFunc("/health", s.handleHealth)

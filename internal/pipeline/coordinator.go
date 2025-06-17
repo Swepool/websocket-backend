@@ -19,7 +19,7 @@ type Coordinator struct {
 	fetcher     *fetcher.Fetcher
 	enhancer    *enhancer.Enhancer
 	scheduler   *scheduler.Scheduler
-	broadcaster *broadcaster.Broadcaster
+	broadcaster broadcaster.BroadcasterInterface
 	statsCollector *stats.Collector
 	
 	channels    *channels.Channels
@@ -50,7 +50,7 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 	
 	e := enhancer.NewEnhancer(config.Enhancer, ch)
 	s := scheduler.NewScheduler(config.Scheduler, ch)
-	b := broadcaster.NewBroadcaster(config.Broadcaster, ch, statsCollector)
+	b := broadcaster.CreateBroadcaster(config.Broadcaster, ch, statsCollector)
 	
 	return &Coordinator{
 		fetcher:     f,
@@ -179,7 +179,7 @@ func (c *Coordinator) GetStatsCollector() *stats.Collector {
 }
 
 // GetBroadcaster returns the broadcaster for WebSocket client management
-func (c *Coordinator) GetBroadcaster() *broadcaster.Broadcaster {
+func (c *Coordinator) GetBroadcaster() broadcaster.BroadcasterInterface {
 	return c.broadcaster
 }
 

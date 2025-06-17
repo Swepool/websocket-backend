@@ -414,12 +414,12 @@ func (f *Fetcher) formatTokenAmount(baseAmount string, decimals int) string {
 	remainder := new(big.Int)
 	quotient.DivMod(amount, divisor, remainder)
 	
-	// Format with up to 6 decimal places
+	// If no remainder, return as integer
 	if remainder.Cmp(big.NewInt(0)) == 0 {
 		return quotient.String()
 	}
 	
-	// Calculate fractional part
+	// Calculate fractional part using big.Float for precision
 	fractional := new(big.Float)
 	fractional.SetInt(remainder)
 	divisorFloat := new(big.Float)
@@ -432,5 +432,6 @@ func (f *Fetcher) formatTokenAmount(baseAmount string, decimals int) string {
 	result := new(big.Float)
 	result.Add(wholeFloat, fractional)
 	
-	return result.Text('f', 6)
+	// Use more decimal places to prevent small amounts from becoming zero
+	return result.Text('f', 18)
 } 

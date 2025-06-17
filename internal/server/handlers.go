@@ -56,7 +56,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"clients":     broadcaster.GetClientCount(),
 		"stats":       statsCollector.GetChartData(),
 		"chains":      len(s.chainsService.GetAllChains()),
+		"broadcaster": broadcaster.GetType(),
 	}
+	
+	// Add shard information if using sharded broadcaster
+	if broadcaster.GetType() == "sharded" {
+		response["shards"] = broadcaster.GetShardStats()
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleBroadcasterStats returns detailed broadcaster statistics
+func (s *Server) handleBroadcasterStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	
+	broadcaster := s.coordinator.GetBroadcaster()
+	
+	// Get comprehensive stats from broadcaster
+	response := broadcaster.GetShardStats()
 	
 	json.NewEncoder(w).Encode(response)
 }
