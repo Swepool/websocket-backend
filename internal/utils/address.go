@@ -2,10 +2,9 @@ package utils
 
 import (
 	"encoding/hex"
-	"fmt"
 	"strings"
 
-	"golang.org/x/crypto/ripemd160"
+	"github.com/btcsuite/btcutil/bech32"
 )
 
 // AddressFormatter handles formatting addresses for different chain types
@@ -55,11 +54,11 @@ func (af *AddressFormatter) formatCosmosAddress(canonicalAddress, prefix string)
 		return cleanCanonical
 	}
 	
-	// If canonical address is hex, convert it to bech32-like format
+	// If canonical address is hex, convert it to proper bech32 format
 	if strings.HasPrefix(cleanCanonical, "0x") || af.isHex(cleanCanonical) {
 		cleanHex := strings.TrimPrefix(cleanCanonical, "0x")
 		if len(cleanHex) >= 32 { // At least 16 bytes
-			return af.hexToBech32Like(cleanHex, prefix)
+			return af.hexToBech32(cleanHex, prefix)
 		}
 	}
 	
@@ -136,31 +135,41 @@ func (af *AddressFormatter) isBech32Like(addr string) bool {
 	return len(prefix) >= 3 && len(prefix) <= 10 && len(data) >= 30
 }
 
-// hexToBech32Like converts a hex address to a bech32-like format (simplified)
-// This is NOT real bech32 encoding - use proper bech32 library in production
-func (af *AddressFormatter) hexToBech32Like(hexAddr, prefix string) string {
+// hexToBech32 converts a hex address to proper bech32 format
+func (af *AddressFormatter) hexToBech32(hexAddr, prefix string) string {
 	// Decode hex to bytes
 	bytes, err := hex.DecodeString(hexAddr)
 	if err != nil {
 		return hexAddr // Return original if conversion fails
 	}
 	
-	// Preserve full length - no truncation
-	// Hash the full bytes using RIPEMD160 to get consistent output
-	hasher := ripemd160.New()
-	hasher.Write(bytes)
-	hash := hasher.Sum(nil)
+	// For cosmos addresses, we typically use the first 20 bytes if longer
+	// This matches the standard cosmos address format
+	if len(bytes) > 20 {
+		bytes = bytes[:20]
+	}
 	
-	// Convert to lowercase hex (full 40 characters for 20 bytes)
-	hashHex := hex.EncodeToString(hash)
+	// Convert bytes to 5-bit groups for bech32 encoding
+	conv, err := bech32.ConvertBits(bytes, 8, 5, true)
+	if err != nil {
+		return hexAddr // Return original if conversion fails
+	}
 	
-	// Create a more realistic bech32-like address
-	// Real bech32 uses base32 encoding, but we'll use hex for simplicity
-	// Format: prefix + "1" + full_hash (this gives ~45 character addresses)
-	return fmt.Sprintf("%s1%s", prefix, hashHex)
+	// Encode using proper bech32
+	encoded, err := bech32.Encode(prefix, conv)
+	if err != nil {
+		return hexAddr // Return original if encoding fails
+	}
+	
+	return encoded
 }
 
 // NewAddressFormatter creates a new AddressFormatter instance
 func NewAddressFormatter() *AddressFormatter {
 	return &AddressFormatter{}
+}
+
+// FormatAddressForDisplay formats an address for display (no truncation)
+func FormatAddressForDisplay(addr string) string {
+	return addr
 } 
