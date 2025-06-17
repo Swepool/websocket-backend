@@ -1,6 +1,5 @@
 <script lang="ts">
 import { chains } from "$lib/stores/chains.svelte"
-import { itemCounts, selectedItemCount } from "$lib/stores/chartSettings"
 import type { TransferListItem } from "@unionlabs/sdk/schema"
 import { Option } from "effect"
 import Card from "./ui/Card.svelte"
@@ -48,8 +47,17 @@ let {
   dataAvailability = DEFAULT_DATA_AVAILABILITY,
 }: Props = $props()
 
+// Local item count configuration
+const itemCounts = [
+  { value: 3, label: "3" },
+  { value: 5, label: "5" },
+  { value: 7, label: "7" },
+  { value: 10, label: "10" },
+]
+
 // State management
 let selectedTimeScale = $state("1m")
+let selectedItemCount = $state(5) // Default to 5 items
 
 // Time scale configuration
 const timeScales = [
@@ -74,7 +82,7 @@ const currentData = $derived.by(() => {
   }
 
   // Limit to selected number for display
-  return data?.slice(0, $selectedItemCount) || []
+  return data?.slice(0, selectedItemCount) || []
 })
 
 const hasData = $derived(currentData.length > 0)
@@ -145,18 +153,7 @@ $effect(() => {
   }
 })
 
-// Debug logging in development
-$effect(() => {
-  if (import.meta.env.DEV) {
-    console.log('PopularRoutesChart data:', {
-      hasData,
-      isLoading,
-      currentDataLength: currentData.length,
-      routesLength: popularRoutes?.length || 0,
-      selectedItemCount: $selectedItemCount
-    })
-  }
-})
+
 </script>
 
 <Card class="h-full p-0">
@@ -206,11 +203,11 @@ $effect(() => {
           {#each itemCounts as itemCount}
             <button
               class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
-                $selectedItemCount === itemCount.value
+                selectedItemCount === itemCount.value
                   ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
                   : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
               }"
-              onclick={() => selectedItemCount.set(itemCount.value)}
+              onclick={() => selectedItemCount = itemCount.value}
             >
               {itemCount.label}
             </button>
@@ -229,7 +226,7 @@ $effect(() => {
         {#if isLoading}
           <!-- Loading State -->
           <div class="space-y-0.5 flex-1">
-            {#each Array($selectedItemCount) as _, index}
+            {#each Array(selectedItemCount) as _, index}
               <div class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                 <div class="flex items-center justify-between mb-0.5">
                   <div class="flex items-center space-x-1 text-xs">
@@ -262,7 +259,7 @@ $effect(() => {
           <!-- Routes Data -->
           <div class="space-y-1 flex-1 overflow-y-auto">
             {#each currentData as route, index}
-              <article class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
+              <article class="p-2 sm:p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                 <!-- Route Header -->
                 <div class="flex items-center justify-between mb-0.5">
                   <div class="flex items-center space-x-1 text-xs">

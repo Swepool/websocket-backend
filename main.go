@@ -15,8 +15,7 @@ import (
 )
 
 func main() {
-	fmt.Printf("=== WebSocket Backend (New Architecture) ===\n")
-	fmt.Printf("Starting with clean pipeline + HLL stats system\n\n")
+	fmt.Printf("Starting WebSocket Backend...\n")
 	
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -24,6 +23,7 @@ func main() {
 	
 	// Load application configuration
 	appConfig := config.DefaultConfig()
+	fmt.Printf("Configuration loaded\n")
 	
 	// Create chains service first
 	chainsService := chains.NewService(appConfig.Chains)
@@ -34,6 +34,7 @@ func main() {
 		fmt.Printf("Failed to create coordinator: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Printf("Pipeline coordinator created\n")
 	
 	// Create server with coordinator and chains service
 	srv := server.NewServer(coordinator, chainsService)
@@ -49,7 +50,7 @@ func main() {
 		}
 	}()
 	
-	// Start HTTP server (which also starts chains service)
+	// Start HTTP server
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -58,25 +59,15 @@ func main() {
 		}
 	}()
 	
-	// Log initial stats
-	time.Sleep(2 * time.Second)
-	fmt.Printf("\n[MAIN] System started successfully:\n")
-	fmt.Printf("  - HTTP server: http://localhost%s\n", appConfig.Server.Port)
-	fmt.Printf("  - WebSocket: ws://localhost%s/ws\n", appConfig.Server.Port)
-	fmt.Printf("  - Chains API: http://localhost%s/api/chains\n", appConfig.Server.Port)
-	fmt.Printf("  - Stats API: http://localhost%s/api/stats\n", appConfig.Server.Port)
-	fmt.Printf("  - Health API: http://localhost%s/api/health\n", appConfig.Server.Port)
-	fmt.Printf("  - Pipeline: 5 threads (fetch→enhance→schedule→stats→broadcast)\n")
-	fmt.Printf("  - Stats: HyperLogLog buckets with automatic aggregation\n")
-	fmt.Printf("  - Fetcher: %v polling, %d batch size, GraphQL: %s\n", appConfig.Fetcher.PollInterval, appConfig.Fetcher.BatchSize, appConfig.Fetcher.GraphQLURL)
-	fmt.Printf("  - Chains: %v refresh from GraphQL\n\n", appConfig.Chains.RefreshInterval)
+	fmt.Printf("WebSocket Backend started successfully on %s\n", appConfig.Server.Port)
+	fmt.Printf("Press Ctrl+C to stop...\n")
 	
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	
 	<-sigChan
-	fmt.Printf("\n[MAIN] Shutdown signal received\n")
+	fmt.Printf("Shutdown signal received...\n")
 	
 	// Cancel context to signal shutdown
 	cancel()
@@ -92,8 +83,8 @@ func main() {
 	// Wait for shutdown with timeout
 	select {
 	case <-done:
-		fmt.Printf("[MAIN] Graceful shutdown completed\n")
+		fmt.Printf("Graceful shutdown completed\n")
 	case <-time.After(10 * time.Second):
-		fmt.Printf("[MAIN] Shutdown timeout reached\n")
+		fmt.Printf("Shutdown timeout reached\n")
 	}
 } 

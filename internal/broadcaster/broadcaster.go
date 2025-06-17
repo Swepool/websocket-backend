@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/models"
+	"websocket-backend-new/models"
+	"websocket-backend-new/internal/stats"
+	"github.com/gorilla/websocket"
 )
 
 // Config holds broadcaster configuration
@@ -26,11 +29,11 @@ func DefaultConfig() Config {
 	}
 }
 
-// Client interface for WebSocket clients
-type Client interface {
-	Send(data []byte) error
-	GetID() string
-	Close() error
+// Client represents a WebSocket client
+type Client struct {
+	id   string
+	conn *websocket.Conn
+	send chan []byte
 }
 
 // StatsCollector interface for getting chart data
@@ -38,153 +41,254 @@ type StatsCollector interface {
 	GetChartDataForFrontend() interface{}
 }
 
-// Broadcaster handles WebSocket broadcasting
+// Broadcaster manages WebSocket clients and broadcasts data
 type Broadcaster struct {
-	config         Config
-	channels       *channels.Channels
-	clients        map[Client]bool
-	mu             sync.RWMutex
-	statsCollector StatsCollector
+	clients         map[*Client]bool
+	register        chan *Client
+	unregister      chan *Client
+	mu              sync.RWMutex
+	upgrader        websocket.Upgrader
+	config          Config
+	channels        *channels.Channels
+	statsCollector  *stats.Collector
 }
 
 // NewBroadcaster creates a new broadcaster
-func NewBroadcaster(config Config, channels *channels.Channels, statsCollector StatsCollector) *Broadcaster {
+func NewBroadcaster(config Config, channels *channels.Channels, statsCollector *stats.Collector) *Broadcaster {
 	return &Broadcaster{
-		config:         config,
-		channels:       channels,
-		clients:        make(map[Client]bool),
+		clients:    make(map[*Client]bool),
+		register:   make(chan *Client),
+		unregister: make(chan *Client),
+		config:     config,
+		channels:   channels,
 		statsCollector: statsCollector,
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Allow connections from any origin
+			},
+		},
 	}
 }
 
-// Start begins the broadcaster thread
+// Start begins the broadcaster's main loop
 func (b *Broadcaster) Start(ctx context.Context) {
-	fmt.Printf("[BROADCASTER] Starting with max clients: %d, buffer size: %d\n", 
-		b.config.MaxClients, b.config.BufferSize)
-	
-	// Start chart data broadcasting every 15 seconds
-	chartTicker := time.NewTicker(15 * time.Second)
+	// Create a ticker for periodic chart updates
+	chartTicker := time.NewTicker(5 * time.Second)
 	defer chartTicker.Stop()
 	
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[BROADCASTER] Shutting down\n")
 			return
 			
+		case client := <-b.register:
+			b.handleClientRegistration(client)
+			
+		case client := <-b.unregister:
+			b.handleClientUnregistration(client)
+			
 		case transfer := <-b.channels.TransferBroadcasts:
+			fmt.Printf("[BROADCASTER] Received transfer %s, broadcasting immediately to %d clients\n", transfer.PacketHash, len(b.clients))
 			b.broadcastTransfer(transfer)
 			
+		case chartData := <-b.channels.ChartUpdates:
+			b.broadcastChartData(chartData)
+			
 		case <-chartTicker.C:
-			b.broadcastChartData()
+			// Periodically send updated chart data to all clients
+			if len(b.clients) > 0 {
+				chartData := b.statsCollector.GetChartDataForFrontend()
+				b.broadcastChartData(chartData)
+				fmt.Printf("[BROADCASTER] Sent periodic chart update to %d clients\n", len(b.clients))
+			}
 		}
 	}
 }
 
-// AddClient adds a new WebSocket client
-func (b *Broadcaster) AddClient(client Client) {
+// handleClientRegistration handles new client registration
+func (b *Broadcaster) handleClientRegistration(client *Client) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	
+	// Check client limits
 	if len(b.clients) >= b.config.MaxClients {
-		fmt.Printf("[BROADCASTER] Max clients reached, rejecting new client\n")
-		client.Close()
+		close(client.send)
 		return
 	}
 	
 	b.clients[client] = true
-	fmt.Printf("[BROADCASTER] Added client %s (total: %d)\n", client.GetID(), len(b.clients))
+	
+	// Start client's send goroutine
+	go client.writePump()
 	
 	// Send initial chart data to new client
-	go b.sendInitialDataToClient(client)
-}
-
-// sendInitialDataToClient sends initial chart data to a newly connected client
-func (b *Broadcaster) sendInitialDataToClient(client Client) {
-	if b.statsCollector == nil {
-		return
-	}
-	
-	// Send initial chart data
-	frontendData := b.statsCollector.GetChartDataForFrontend()
-	
-	// Wrap chart data in "data" field to match frontend expectations
-	message := map[string]interface{}{
+	chartData := b.statsCollector.GetChartDataForFrontend()
+	data, err := json.Marshal(map[string]interface{}{
 		"type": "chartData",
-		"data": frontendData,
-	}
-	
-	jsonData, err := json.Marshal(message)
+		"data": chartData,
+	})
 	if err != nil {
-		fmt.Printf("[BROADCASTER] Error marshaling initial chart data: %v\n", err)
 		return
 	}
 	
-	if err := client.Send(jsonData); err != nil {
-		fmt.Printf("[BROADCASTER] Error sending initial data to client %s: %v\n", client.GetID(), err)
-	} else {
-		fmt.Printf("[BROADCASTER] Sent initial chart data to client %s\n", client.GetID())
+	select {
+	case client.send <- data:
+	default:
+		close(client.send)
+		delete(b.clients, client)
 	}
 }
 
-// RemoveClient removes a WebSocket client
-func (b *Broadcaster) RemoveClient(client Client) {
+// handleClientUnregistration handles client disconnection
+func (b *Broadcaster) handleClientUnregistration(client *Client) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	
-	if _, exists := b.clients[client]; exists {
+	if _, ok := b.clients[client]; ok {
 		delete(b.clients, client)
-		fmt.Printf("[BROADCASTER] Removed client %s (total: %d)\n", client.GetID(), len(b.clients))
+		close(client.send)
 	}
 }
 
-// broadcastTransfer broadcasts a single transfer to all clients
+// broadcastTransfer broadcasts a single transfer to all connected clients (in array format)
 func (b *Broadcaster) broadcastTransfer(transfer models.Transfer) {
-	b.mu.RLock()
-	clientCount := len(b.clients)
-	b.mu.RUnlock()
-
-	if clientCount == 0 {
-		return // No clients to broadcast to
-	}
-
-	// Convert to BroadcastTransfer format (includes isTestnetTransfer field)
-	broadcastTransfer := convertToBroadcastTransfer(transfer)
-
-	// Create message matching frontend expectations (with timestamp like old system)
-	message := map[string]interface{}{
-		"type":      "transfers",
-		"data":      []interface{}{broadcastTransfer}, // Single transfer in array as expected
-		"timestamp": time.Now().Unix(),
+	// Convert to frontend-expected TransferListItem + enhanced format
+	enhancedTransfer := map[string]interface{}{
+		"source_chain": map[string]interface{}{
+			"universal_chain_id": transfer.SourceChain.UniversalChainID,
+			"display_name":       transfer.SourceChain.DisplayName,
+			"chain_id":           transfer.SourceChain.ChainID,
+			"testnet":            transfer.SourceChain.Testnet,
+			"rpc_type":           transfer.SourceChain.RpcType,
+			"addr_prefix":        transfer.SourceChain.AddrPrefix,
+		},
+		"destination_chain": map[string]interface{}{
+			"universal_chain_id": transfer.DestinationChain.UniversalChainID,
+			"display_name":       transfer.DestinationChain.DisplayName,
+			"chain_id":           transfer.DestinationChain.ChainID,
+			"testnet":            transfer.DestinationChain.Testnet,
+			"rpc_type":           transfer.DestinationChain.RpcType,
+			"addr_prefix":        transfer.DestinationChain.AddrPrefix,
+		},
+		"packet_hash": transfer.PacketHash,
+		// Enhanced fields that frontend expects
+		"isTestnetTransfer":      transfer.IsTestnetTransfer,
+		"sourceDisplayName":      transfer.SourceDisplayName,
+		"destinationDisplayName": transfer.DestinationDisplayName,
+		"formattedTimestamp":     transfer.FormattedTimestamp,
+		"routeKey":               transfer.RouteKey,
+		"senderDisplay":          transfer.SenderDisplay,
+		"receiverDisplay":        transfer.ReceiverDisplay,
 	}
 	
-	data, err := json.Marshal(message)
+	// Send as array with single transfer (frontend expects arrays)
+	data, err := json.Marshal(map[string]interface{}{
+		"type": "transfers",
+		"data": []map[string]interface{}{enhancedTransfer},
+	})
 	if err != nil {
-		fmt.Printf("[BROADCASTER] Error marshaling transfer: %v\n", err)
 		return
 	}
 	
-	// Broadcast to all clients
 	b.mu.RLock()
-	clients := make([]Client, 0, len(b.clients))
+	clients := make([]*Client, 0, len(b.clients))
 	for client := range b.clients {
 		clients = append(clients, client)
 	}
 	b.mu.RUnlock()
 	
-	// Send asynchronously to all clients (fire-and-forget)
+	// Send to all clients asynchronously
 	for _, client := range clients {
-		go func(c Client) {
-			if err := c.Send(data); err != nil {
-				if b.config.DropSlowClients {
-					b.RemoveClient(c)
-				}
+		go func(c *Client) {
+			select {
+			case c.send <- data:
+			default:
+				// Client's send channel is full
+				b.unregister <- c
 			}
 		}(client)
 	}
 	
-	fmt.Printf("[BROADCASTER] Broadcasting transfer %s to %d clients (async)\n", 
-		transfer.PacketHash, clientCount)
+	if len(clients) > 0 {
+		fmt.Printf("[BROADCASTER] Sent transfer %s to %d clients\n", transfer.PacketHash, len(clients))
+	}
+}
+
+// broadcastChartData broadcasts chart data to all connected clients
+func (b *Broadcaster) broadcastChartData(rawData interface{}) {
+	data, err := json.Marshal(map[string]interface{}{
+		"type": "chartData",
+		"data": rawData,
+	})
+	if err != nil {
+		return
+	}
+	
+	b.mu.RLock()
+	clients := make([]*Client, 0, len(b.clients))
+	for client := range b.clients {
+		clients = append(clients, client)
+	}
+	b.mu.RUnlock()
+	
+	// Send to all clients asynchronously
+	for _, client := range clients {
+		go func(c *Client) {
+			select {
+			case c.send <- data:
+			default:
+				// Client's send channel is full
+				b.unregister <- c
+			}
+		}(client)
+	}
+}
+
+// broadcastStats broadcasts stats data to all connected clients
+func (b *Broadcaster) broadcastStats(stats interface{}) {
+	data, err := json.Marshal(map[string]interface{}{
+		"type": "stats_update",
+		"data": stats,
+	})
+	if err != nil {
+		return
+	}
+	
+	b.mu.RLock()
+	clients := make([]*Client, 0, len(b.clients))
+	for client := range b.clients {
+		clients = append(clients, client)
+	}
+	b.mu.RUnlock()
+	
+	// Send to all clients
+	for _, client := range clients {
+		select {
+		case client.send <- data:
+		default:
+			close(client.send)
+			delete(b.clients, client)
+		}
+	}
+}
+
+// UpgradeConnection upgrades HTTP connection to WebSocket
+func (b *Broadcaster) UpgradeConnection(w http.ResponseWriter, r *http.Request) {
+	conn, err := b.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	
+	client := &Client{
+		id:   generateClientID(),
+		conn: conn,
+		send: make(chan []byte, 256),
+	}
+	
+	b.register <- client
+	
+	// Start read pump for this client
+	go client.readPump(b.unregister)
 }
 
 // GetClientCount returns the current number of connected clients
@@ -194,139 +298,64 @@ func (b *Broadcaster) GetClientCount() int {
 	return len(b.clients)
 }
 
-// broadcastChartData broadcasts chart data to all clients every 15 seconds
-func (b *Broadcaster) broadcastChartData() {
-	b.mu.RLock()
-	clientCount := len(b.clients)
-	b.mu.RUnlock()
+// writePump pumps messages from the hub to the websocket connection
+func (c *Client) writePump() {
+	ticker := time.NewTicker(54 * time.Second)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
 	
-	if clientCount == 0 {
-		return
-	}
-	
-	if b.statsCollector == nil {
-		return
-	}
-	
-	// Get chart data formatted for frontend
-	frontendData := b.statsCollector.GetChartDataForFrontend()
-	
-	// Wrap chart data in "data" field to match frontend expectations
-	message := map[string]interface{}{
-		"type": "chartData",
-		"data": frontendData,
-	}
-	
-	jsonData, err := json.Marshal(message)
-	if err != nil {
-		fmt.Printf("[BROADCASTER] Error marshaling chart data: %v\n", err)
-		return
-	}
-	
-	// Broadcast to all clients asynchronously
-	b.mu.RLock()
-	clients := make([]Client, 0, len(b.clients))
-	for client := range b.clients {
-		clients = append(clients, client)
-	}
-	b.mu.RUnlock()
-	
-	// Send asynchronously to all clients (fire-and-forget)
-	for _, client := range clients {
-		go func(c Client) {
-			if err := c.Send(jsonData); err != nil {
-				if b.config.DropSlowClients {
-					b.RemoveClient(c)
-				}
+	for {
+		select {
+		case message, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if !ok {
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
 			}
-		}(client)
-	}
-	
-	fmt.Printf("[BROADCASTER] Broadcasting chart data to %d clients (async)\n", len(clients))
-}
-
-// transformChartDataForFrontend converts our chart data to match frontend expectations
-func (b *Broadcaster) transformChartDataForFrontend(data interface{}) interface{} {
-	// For now, return as-is, but we can transform here to match frontend structure
-	// The frontend expects currentRates, activeWalletRates, etc.
-	return data
-}
-
-// BroadcastStats broadcasts stats data to all clients
-func (b *Broadcaster) BroadcastStats(data interface{}) {
-	b.mu.RLock()
-	clientCount := len(b.clients)
-	b.mu.RUnlock()
-	
-	if clientCount == 0 {
-		return
-	}
-	
-	message := map[string]interface{}{
-		"type": "stats",
-		"data": data,
-	}
-	
-	jsonData, err := json.Marshal(message)
-	if err != nil {
-		fmt.Printf("[BROADCASTER] Error marshaling stats: %v\n", err)
-		return
-	}
-	
-	// Broadcast to all clients (simplified)
-	b.mu.RLock()
-	for client := range b.clients {
-		go func(c Client) {
-			if err := c.Send(jsonData); err != nil {
-				if b.config.DropSlowClients {
-					b.RemoveClient(c)
-				}
+			
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
 			}
-		}(client)
+			
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
 	}
-	b.mu.RUnlock()
 }
 
-// convertToBroadcastTransfer converts internal models.Transfer to broadcast format
-func convertToBroadcastTransfer(transfer models.Transfer) map[string]interface{} {
-	// Determine if it's a testnet transfer
-	isTestnet := transfer.SourceChain.Testnet || transfer.DestinationChain.Testnet
+// readPump pumps messages from the websocket connection to the hub
+func (c *Client) readPump(unregister chan<- *Client) {
+	defer func() {
+		unregister <- c
+		c.conn.Close()
+	}()
 	
-	// Format timestamp as string
-	formattedTimestamp := transfer.TransferSendTimestamp.Format("2006-01-02 15:04:05")
+	c.conn.SetReadLimit(512)
+	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
 	
-	// Create route key
-	routeKey := transfer.SourceChain.UniversalChainID + "_" + transfer.DestinationChain.UniversalChainID
-	
-	// Use SenderDisplay and ReceiverDisplay if available, otherwise use canonical
-	senderDisplay := transfer.SenderDisplay
-	if senderDisplay == "" {
-		senderDisplay = transfer.SenderCanonical
+	for {
+		_, _, err := c.conn.ReadMessage()
+		if err != nil {
+			break
+		}
 	}
-	
-	receiverDisplay := transfer.ReceiverDisplay
-	if receiverDisplay == "" {
-		receiverDisplay = transfer.ReceiverCanonical
-	}
-	
-	return map[string]interface{}{
-		"source_chain": map[string]interface{}{
-			"universal_chain_id": transfer.SourceChain.UniversalChainID,
-			"display_name":       transfer.SourceChain.DisplayName,
-		},
-		"destination_chain": map[string]interface{}{
-			"universal_chain_id": transfer.DestinationChain.UniversalChainID,
-			"display_name":       transfer.DestinationChain.DisplayName,
-		},
-		"packet_hash":                transfer.PacketHash,
-		"sort_order":                 transfer.SortOrder,
-		"isTestnetTransfer":          isTestnet,
-		"formattedTimestamp":         formattedTimestamp,
-		"routeKey":                   routeKey,
-		"senderDisplay":              senderDisplay,
-		"receiverDisplay":            receiverDisplay,
-		"baseAmount":                 transfer.BaseTokenAmountDisplay,
-		"baseTokenSymbol":            transfer.BaseTokenSymbol,
-		"transferSendTimestamp":      transfer.TransferSendTimestamp,
-	}
+}
+
+// GetID returns the client's ID
+func (c *Client) GetID() string {
+	return c.id
+}
+
+// generateClientID generates a unique client ID
+func generateClientID() string {
+	return fmt.Sprintf("client_%d", time.Now().UnixNano())
 } 

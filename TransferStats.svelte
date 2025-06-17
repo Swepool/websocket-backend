@@ -68,22 +68,28 @@ interface ActiveWalletRates {
   uniqueSendersTotal: number
   uniqueReceiversTotal: number
   uniqueTotalWallets: number
+  dataAvailability: {
+    hasMinute: boolean
+    hasHour: boolean
+    hasDay: boolean
+    has7Days: boolean
+    has14Days: boolean
+    has30Days: boolean
+  }
   serverUptimeSeconds: number
-}
-
-interface DataAvailability {
-  hasMinute: boolean
-  hasHour: boolean
-  hasDay: boolean
-  has7Days: boolean
-  has14Days: boolean
-  has30Days: boolean
 }
 
 interface Props {
   transferRates?: TransferRates | null
   activeWalletRates?: ActiveWalletRates | null
-  dataAvailability?: DataAvailability
+  dataAvailability?: {
+    hasMinute: boolean
+    hasHour: boolean
+    hasDay: boolean
+    has7Days: boolean
+    has14Days: boolean
+    has30Days: boolean
+  }
   connectionStatus?: "connecting" | "connected" | "disconnected" | "error"
 }
 
@@ -128,22 +134,21 @@ const DEFAULT_WALLET_RATES: ActiveWalletRates = {
   uniqueSendersTotal: 0,
   uniqueReceiversTotal: 0,
   uniqueTotalWallets: 0,
+  dataAvailability: {
+    hasMinute: false,
+    hasHour: false,
+    hasDay: false,
+    has7Days: false,
+    has14Days: false,
+    has30Days: false,
+  },
   serverUptimeSeconds: 0,
-}
-
-const DEFAULT_DATA_AVAILABILITY: DataAvailability = {
-  hasMinute: false,
-  hasHour: false,
-  hasDay: false,
-  has7Days: false,
-  has14Days: false,
-  has30Days: false,
 }
 
 let {
   transferRates = null,
   activeWalletRates = null,
-  dataAvailability = DEFAULT_DATA_AVAILABILITY,
+  dataAvailability = null,
   connectionStatus = "disconnected",
 }: Props = $props()
 
@@ -193,17 +198,19 @@ const toggleMute = async () => {
   }
 }
 
-// Debug logging in development
-$effect(() => {
-  if (import.meta.env.DEV) {
-    console.log('TransferStats data:', {
-      hasTransferRates: !!transferRates,
-      hasWalletRates: !!activeWalletRates,
-      connectionStatus,
-      uptimeSeconds: rates.serverUptimeSeconds
-    })
+
+
+// Get data availability - prefer from activeWalletRates, fallback to prop
+let walletDataAvailability = $derived(
+  wallets.dataAvailability || dataAvailability || {
+    hasMinute: false,
+    hasHour: false,
+    hasDay: false,
+    has7Days: false,
+    has14Days: false,
+    has30Days: false,
   }
-})
+)
 </script>
 
 <Card class="h-full p-0">
@@ -372,65 +379,65 @@ $effect(() => {
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1m:</span>
               <div class="text-right">
-                {#if dataAvailability.hasMinute}
+                {#if walletDataAvailability.hasMinute}
                   <span
                     class="text-[10px] mr-1 {wallets.sendersLastMinChange && wallets.sendersLastMinChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.sendersLastMinChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasMinute ? wallets.sendersLastMin : "--"}
+                  {walletDataAvailability.hasMinute ? wallets.sendersLastMin : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1h:</span>
               <div class="text-right">
-                {#if dataAvailability.hasHour}
+                {#if walletDataAvailability.hasHour}
                   <span
                     class="text-[10px] mr-1 {wallets.sendersLastHourChange && wallets.sendersLastHourChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.sendersLastHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasHour ? wallets.sendersLastHour : "--"}
+                  {walletDataAvailability.hasHour ? wallets.sendersLastHour : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1d:</span>
               <div class="text-right">
-                {#if dataAvailability.hasDay}
+                {#if walletDataAvailability.hasDay}
                   <span
                     class="text-[10px] mr-1 {wallets.sendersLastDayChange && wallets.sendersLastDayChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.sendersLastDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasDay ? wallets.sendersLastDay : "--"}
+                  {walletDataAvailability.hasDay ? wallets.sendersLastDay : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">7d:</span>
               <div class="text-right">
-                {#if dataAvailability.has7Days}
+                {#if walletDataAvailability.has7Days}
                   <span
                     class="text-[10px] mr-1 {wallets.sendersLast7dChange && wallets.sendersLast7dChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.sendersLast7dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.has7Days ? wallets.sendersLast7d : "--"}
+                  {walletDataAvailability.has7Days ? wallets.sendersLast7d : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">30d:</span>
               <div class="text-right">
-                {#if dataAvailability.has30Days}
+                {#if walletDataAvailability.has30Days}
                   <span
                     class="text-[10px] mr-1 {wallets.sendersLast30dChange && wallets.sendersLast30dChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.sendersLast30dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.has30Days ? wallets.sendersLast30d : "--"}
+                  {walletDataAvailability.has30Days ? wallets.sendersLast30d : "--"}
                 </span>
               </div>
             </div>
@@ -444,65 +451,65 @@ $effect(() => {
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1m:</span>
               <div class="text-right">
-                {#if dataAvailability.hasMinute}
+                {#if walletDataAvailability.hasMinute}
                   <span
                     class="text-[10px] mr-1 {wallets.receiversLastMinChange && wallets.receiversLastMinChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.receiversLastMinChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasMinute ? wallets.receiversLastMin : "--"}
+                  {walletDataAvailability.hasMinute ? wallets.receiversLastMin : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1h:</span>
               <div class="text-right">
-                {#if dataAvailability.hasHour}
+                {#if walletDataAvailability.hasHour}
                   <span
                     class="text-[10px] mr-1 {wallets.receiversLastHourChange && wallets.receiversLastHourChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.receiversLastHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasHour ? wallets.receiversLastHour : "--"}
+                  {walletDataAvailability.hasHour ? wallets.receiversLastHour : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1d:</span>
               <div class="text-right">
-                {#if dataAvailability.hasDay}
+                {#if walletDataAvailability.hasDay}
                   <span
                     class="text-[10px] mr-1 {wallets.receiversLastDayChange && wallets.receiversLastDayChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.receiversLastDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasDay ? wallets.receiversLastDay : "--"}
+                  {walletDataAvailability.hasDay ? wallets.receiversLastDay : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">7d:</span>
               <div class="text-right">
-                {#if dataAvailability.has7Days}
+                {#if walletDataAvailability.has7Days}
                   <span
                     class="text-[10px] mr-1 {wallets.receiversLast7dChange && wallets.receiversLast7dChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.receiversLast7dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.has7Days ? wallets.receiversLast7d : "--"}
+                  {walletDataAvailability.has7Days ? wallets.receiversLast7d : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">30d:</span>
               <div class="text-right">
-                {#if dataAvailability.has30Days}
+                {#if walletDataAvailability.has30Days}
                   <span
                     class="text-[10px] mr-1 {wallets.receiversLast30dChange && wallets.receiversLast30dChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.receiversLast30dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.has30Days ? wallets.receiversLast30d : "--"}
+                  {walletDataAvailability.has30Days ? wallets.receiversLast30d : "--"}
                 </span>
               </div>
             </div>
@@ -516,65 +523,65 @@ $effect(() => {
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1m:</span>
               <div class="text-right">
-                {#if dataAvailability.hasMinute}
+                {#if walletDataAvailability.hasMinute}
                   <span
                     class="text-[10px] mr-1 {wallets.totalLastMinChange && wallets.totalLastMinChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.totalLastMinChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasMinute ? wallets.totalLastMin : "--"}
+                  {walletDataAvailability.hasMinute ? wallets.totalLastMin : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1h:</span>
               <div class="text-right">
-                {#if dataAvailability.hasHour}
+                {#if walletDataAvailability.hasHour}
                   <span
                     class="text-[10px] mr-1 {wallets.totalLastHourChange && wallets.totalLastHourChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.totalLastHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasHour ? wallets.totalLastHour : "--"}
+                  {walletDataAvailability.hasHour ? wallets.totalLastHour : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">1d:</span>
               <div class="text-right">
-                {#if dataAvailability.hasDay}
+                {#if walletDataAvailability.hasDay}
                   <span
                     class="text-[10px] mr-1 {wallets.totalLastDayChange && wallets.totalLastDayChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.totalLastDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.hasDay ? wallets.totalLastDay : "--"}
+                  {walletDataAvailability.hasDay ? wallets.totalLastDay : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">7d:</span>
               <div class="text-right">
-                {#if dataAvailability.has7Days}
+                {#if walletDataAvailability.has7Days}
                   <span
                     class="text-[10px] mr-1 {wallets.totalLast7dChange && wallets.totalLast7dChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.totalLast7dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.has7Days ? wallets.totalLast7d : "--"}
+                  {walletDataAvailability.has7Days ? wallets.totalLast7d : "--"}
                 </span>
               </div>
             </div>
             <div class="flex justify-between font-mono items-center">
               <span class="text-zinc-400">30d:</span>
               <div class="text-right">
-                {#if dataAvailability.has30Days}
+                {#if walletDataAvailability.has30Days}
                   <span
                     class="text-[10px] mr-1 {wallets.totalLast30dChange && wallets.totalLast30dChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                   >{formatPercentageChange(wallets.totalLast30dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {dataAvailability.has30Days ? wallets.totalLast30d : "--"}
+                  {walletDataAvailability.has30Days ? wallets.totalLast30d : "--"}
                 </span>
               </div>
             </div>

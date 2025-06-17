@@ -108,7 +108,7 @@ func (b *Broadcaster) broadcastChartData(chartData models.ChartData) {
 	// Send to WebSocket clients
 	if clientCount > 0 {
 		message := map[string]interface{}{
-			"type": "chart_data",
+			"type": "chartData",
 			"data": chartData,
 		}
 		

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { itemCounts, selectedItemCount } from "$lib/stores/chartSettings"
   import Card from "./ui/Card.svelte"
   import Skeleton from "./ui/Skeleton.svelte"
   
@@ -96,9 +95,18 @@
     activeWalletRates = DEFAULT_WALLET_RATES,
     dataAvailability = DEFAULT_DATA_AVAILABILITY,
   }: Props = $props()
+
+  // Local item count configuration
+  const itemCounts = [
+    { value: 3, label: "3" },
+    { value: 5, label: "5" },
+    { value: 7, label: "7" },
+    { value: 10, label: "10" },
+  ]
   
   // State management
   let selectedTimeFrame = $state("1m")
+  let selectedItemCount = $state(5) // Default to 5 items
   
   // Time frame configuration
   const timeFrames = [
@@ -122,7 +130,7 @@
       data = activeSenders
     }
 
-    return data?.slice(0, $selectedItemCount) || []
+    return data?.slice(0, selectedItemCount) || []
   })
 
   const currentReceivers = $derived.by(() => {
@@ -136,7 +144,7 @@
       data = activeReceivers
     }
 
-    return data?.slice(0, $selectedItemCount) || []
+    return data?.slice(0, selectedItemCount) || []
   })
 
   const chartData = $derived({
@@ -231,20 +239,7 @@
     }
   })
 
-  // Debug logging in development
-  $effect(() => {
-    if (import.meta.env.DEV) {
-      console.log('WalletActivityChart data:', {
-        hasData,
-        isLoading,
-        currentSendersLength: currentSenders.length,
-        currentReceiversLength: currentReceivers.length,
-        activeSendersLength: activeSenders?.length || 0,
-        activeReceiversLength: activeReceivers?.length || 0,
-        selectedItemCount: $selectedItemCount
-      })
-    }
-  })
+
 
   const walletCounts = $derived(getWalletCounts())
   const selectedTimeFrameInfo = $derived(timeFrames.find(tf => tf.key === selectedTimeFrame))
@@ -299,11 +294,11 @@
           {#each itemCounts as itemCount}
             <button
               class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
-                $selectedItemCount === itemCount.value
+                selectedItemCount === itemCount.value
                   ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
                   : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
               }"
-              onclick={() => selectedItemCount.set(itemCount.value)}
+              onclick={() => selectedItemCount = itemCount.value}
             >
               {itemCount.label}
             </button>
@@ -323,7 +318,7 @@
               top_senders:
             </div>
             <div class="space-y-0.5">
-              {#each Array($selectedItemCount) as _, index}
+              {#each Array(selectedItemCount) as _, index}
                 <div class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                   <div class="flex items-center justify-between mb-0.5">
                     <div class="flex items-center space-x-1">
@@ -347,7 +342,7 @@
               top_receivers:
             </div>
             <div class="space-y-0.5">
-              {#each Array($selectedItemCount) as _, index}
+              {#each Array(selectedItemCount) as _, index}
                 <div class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                   <div class="flex items-center justify-between mb-0.5">
                     <div class="flex items-center space-x-1">
@@ -381,8 +376,8 @@
               top_senders:
             </div>
             <div class="space-y-1 overflow-y-auto">
-              {#each chartData.activeSenders.slice(0, $selectedItemCount) as sender, index}
-                <article class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
+              {#each chartData.activeSenders.slice(0, selectedItemCount) as sender, index}
+                <article class="p-2 sm:p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                   <!-- Sender Header -->
                   <div class="flex items-center justify-between mb-0.5">
                     <div class="flex items-center space-x-1 text-xs">
@@ -433,8 +428,8 @@
               top_receivers:
             </div>
             <div class="space-y-1 overflow-y-auto">
-              {#each chartData.activeReceivers.slice(0, $selectedItemCount) as receiver, index}
-                <article class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
+              {#each chartData.activeReceivers.slice(0, selectedItemCount) as receiver, index}
+                <article class="p-2 sm:p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                   <!-- Receiver Header -->
                   <div class="flex items-center justify-between mb-0.5">
                     <div class="flex items-center space-x-1 text-xs">

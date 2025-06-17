@@ -6,17 +6,26 @@ import (
 	"sort"
 	"strings"
 	"fmt"
-	"websocket-backend-new/internal/models"
+	"websocket-backend-new/models"
 	"websocket-backend-new/internal/utils"
 	"github.com/axiomhq/hyperloglog"
 )
 
 // Config holds stats collection configuration
 type Config struct {
-	RetentionHours      int     // How long to keep detailed buckets (default: 24)
-	TopItemsLimit       int     // Max items to return for charts (default: 20)
-	TopItemsTimeScale   int     // Max items to return for time scale data (default: 10)
-	CleanupInterval     time.Duration // How often to run cleanup (default: 1 hour)
+	RetentionHours         int           // How long to keep detailed buckets (default: 24) - DEPRECATED: use specific retention fields
+	TopItemsLimit          int           // Max items to return for charts (default: 20)
+	TopItemsTimeScale      int           // Max items to return for time scale data (default: 10)
+	CleanupInterval        time.Duration // How often to run cleanup (default: 15 minutes for aggressive cleanup)
+	TenSecondRetention     time.Duration // How long to keep 10s buckets (default: 30 minutes for memory optimization)
+	
+	// 5-tier retention system with 1-year maximum
+	OneMinuteRetention     time.Duration // How long to keep 1m buckets before aggregating to 1h (default: 6 hours)
+	OneHourRetention       time.Duration // How long to keep 1h buckets before aggregating to daily (default: 7 days)
+	DailyRetention         time.Duration // How long to keep daily buckets before aggregating to weekly (default: 30 days)
+	WeeklyRetention        time.Duration // How long to keep weekly buckets before deletion (default: 1 year)
+	MonthlyRetention       time.Duration // DEPRECATED - no longer used (set to 0)
+	YearlyRetention        time.Duration // DEPRECATED - no longer used (set to 0)
 }
 
 // AddressChainInfo stores chain context for address formatting
@@ -25,13 +34,46 @@ type AddressChainInfo struct {
 	AddrPrefix string
 }
 
-// DefaultConfig returns sensible defaults
+// Memory pools for bucket reuse and HLL optimization
+var (
+	bucketPool = sync.Pool{
+		New: func() interface{} {
+			return &StatsBucket{
+				Routes:            make(map[string]*RouteStats),
+				ChainOutgoing:     make(map[string]int64),
+				ChainIncoming:     make(map[string]int64),
+				ChainSendersHLL:   make(map[string]*hyperloglog.Sketch),
+				ChainReceiversHLL: make(map[string]*hyperloglog.Sketch),
+				ChainUsersHLL:     make(map[string]*hyperloglog.Sketch),
+				ChainAssets:       make(map[string]map[string]*ChainAssetStats),
+				Senders:           make(map[string]int64),
+				Receivers:         make(map[string]int64),
+				Assets:            make(map[string]*AssetStats),
+				// HLL sketches will be created with optimized precision when needed
+			}
+		},
+	}
+
+	// Note: HLL sketches cannot be pooled since axiomhq/hyperloglog doesn't provide a Clear() method
+	// Memory savings will come from reduced precision (New14 vs New16) rather than pooling
+)
+
+// DefaultConfig returns optimized defaults for 1-year maximum retention
 func DefaultConfig() Config {
 	return Config{
-		RetentionHours:    24,
-		TopItemsLimit:     20,
-		TopItemsTimeScale: 10,
-		CleanupInterval:   time.Hour,
+		RetentionHours:     24,  // Kept for backward compatibility - will be ignored in favor of specific retention fields
+		TopItemsLimit:      20,
+		TopItemsTimeScale:  10,
+		CleanupInterval:    15 * time.Minute, // More aggressive cleanup
+		TenSecondRetention: 30 * time.Minute, // 10s→1m after 30 minutes
+		
+		// 5-tier retention for 1-year maximum (simplified system)
+		OneMinuteRetention: 6 * time.Hour,        // 1m→1h after 6 hours
+		OneHourRetention:   7 * 24 * time.Hour,   // 1h→daily after 7 days  
+		DailyRetention:     30 * 24 * time.Hour,  // daily→weekly after 30 days
+		WeeklyRetention:    365 * 24 * time.Hour, // weekly→delete after 1 year
+		MonthlyRetention:   0,                    // REMOVED - no monthly buckets
+		YearlyRetention:    0,                    // REMOVED - no yearly buckets
 	}
 }
 
@@ -41,12 +83,14 @@ type Collector struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 	
-	// Time-based buckets (10-second granularity)
-	buckets10s map[time.Time]*StatsBucket
-	buckets1m  map[time.Time]*StatsBucket
-	buckets1h  map[time.Time]*StatsBucket
+	// 5-tier time-based buckets for 1-year maximum retention
+	buckets10s     map[time.Time]*StatsBucket // 10-second granularity (0-30min)
+	buckets1m      map[time.Time]*StatsBucket // 1-minute granularity (30min-6h)
+	buckets1h      map[time.Time]*StatsBucket // 1-hour granularity (6h-7d)
+	bucketsDaily   map[time.Time]*StatsBucket // Daily granularity (7d-30d)
+	bucketsWeekly  map[time.Time]*StatsBucket // Weekly granularity (30d-1y, then delete)
 	
-	// Global HLL sketches for overall unique counting
+	// Global HLL sketches for overall unique counting (keep high precision)
 	globalSendersHLL   *hyperloglog.Sketch
 	globalReceiversHLL *hyperloglog.Sketch
 	globalWalletsHLL   *hyperloglog.Sketch
@@ -78,10 +122,120 @@ type Collector struct {
 	lastCleanup time.Time
 }
 
+// getOrCreateOptimizedHLL creates HLL with appropriate precision for the use case
+func getOrCreateOptimizedHLL(hllType string) *hyperloglog.Sketch {
+	switch hllType {
+	case "bucket": // Per-bucket unique counting - medium precision
+		return hyperloglog.New14() // 1.5KB, 1.63% error - good balance for bucket-level tracking
+	case "chain", "asset": // Per-chain/asset unique counting - lower precision is acceptable
+		return hyperloglog.New14() // Use same precision since New12() doesn't exist
+	default: // Global/critical counting - high precision
+		return hyperloglog.New16() // 6KB, 0.81% error - highest precision for global metrics
+	}
+}
+
+// returnOptimizedHLL is no longer needed since HLL sketches can't be reset/pooled
+// The axiomhq/hyperloglog library doesn't provide a Clear() method, so we can't safely pool HLL sketches
+func returnOptimizedHLL(hll *hyperloglog.Sketch, hllType string) {
+	// No-op: HLL sketches cannot be reset, so no pooling
+	// Memory will be handled by Go's garbage collector
+}
+
+// getBucketFromPool gets a bucket from the pool and initializes it
+func getBucketFromPool(timestamp time.Time, granularity string) *StatsBucket {
+	bucket := bucketPool.Get().(*StatsBucket)
+	
+	// Reset bucket state
+	bucket.Timestamp = timestamp
+	bucket.Granularity = granularity
+	bucket.TransferCount = 0
+	
+	// Clear maps but reuse underlying storage
+	for k := range bucket.Routes {
+		delete(bucket.Routes, k)
+	}
+	for k := range bucket.ChainOutgoing {
+		delete(bucket.ChainOutgoing, k)
+	}
+	for k := range bucket.ChainIncoming {
+		delete(bucket.ChainIncoming, k)
+	}
+	for k := range bucket.ChainSendersHLL {
+		delete(bucket.ChainSendersHLL, k)
+	}
+	for k := range bucket.ChainReceiversHLL {
+		delete(bucket.ChainReceiversHLL, k)
+	}
+	for k := range bucket.ChainUsersHLL {
+		delete(bucket.ChainUsersHLL, k)
+	}
+	for k := range bucket.ChainAssets {
+		delete(bucket.ChainAssets, k)
+	}
+	for k := range bucket.Senders {
+		delete(bucket.Senders, k)
+	}
+	for k := range bucket.Receivers {
+		delete(bucket.Receivers, k)
+	}
+	for k := range bucket.Assets {
+		delete(bucket.Assets, k)
+	}
+	
+	// Initialize optimized HLL sketches
+	bucket.SendersHLL = getOrCreateOptimizedHLL("bucket")
+	bucket.ReceiversHLL = getOrCreateOptimizedHLL("bucket")
+	bucket.WalletsHLL = getOrCreateOptimizedHLL("bucket")
+	
+	return bucket
+}
+
+// returnBucketToPool returns a bucket to the pool after cleanup
+func returnBucketToPool(bucket *StatsBucket) {
+	if bucket == nil {
+		return
+	}
+	
+	// HLL sketches cannot be pooled since they can't be reset
+	// They will be garbage collected naturally
+	
+	// Clear references to allow garbage collection
+	bucket.SendersHLL = nil
+	bucket.ReceiversHLL = nil
+	bucket.WalletsHLL = nil
+	
+	// Clear chain HLL references
+	for k := range bucket.ChainSendersHLL {
+		bucket.ChainSendersHLL[k] = nil
+		delete(bucket.ChainSendersHLL, k)
+	}
+	for k := range bucket.ChainReceiversHLL {
+		bucket.ChainReceiversHLL[k] = nil
+		delete(bucket.ChainReceiversHLL, k)
+	}
+	for k := range bucket.ChainUsersHLL {
+		bucket.ChainUsersHLL[k] = nil
+		delete(bucket.ChainUsersHLL, k)
+	}
+	
+	// Clear asset HLL references
+	for _, assets := range bucket.ChainAssets {
+		for _, asset := range assets {
+			asset.HoldersHLL = nil
+		}
+	}
+	for _, asset := range bucket.Assets {
+		asset.HoldersHLL = nil
+	}
+	
+	// Return bucket structure to pool (maps will be reused)
+	bucketPool.Put(bucket)
+}
+
 // StatsBucket contains all stats for a specific time period
 type StatsBucket struct {
 	Timestamp   time.Time `json:"timestamp"`
-	Granularity string    `json:"granularity"` // "10s", "1m", "1h"
+	Granularity string    `json:"granularity"` // "10s", "1m", "1h", "daily", "weekly", "monthly", "yearly"
 	
 	// Transfer counts
 	TransferCount int64 `json:"transferCount"`
@@ -225,14 +379,16 @@ type ChainFlowStats struct {
 	TopAssets        []ChainAssetStats `json:"topAssets,omitempty"` // Top assets flowing through this chain
 }
 
-// NewCollector creates a new stats collector
+// NewCollector creates a new stats collector with 5-tier bucket system (1-year max)
 func NewCollector(config Config) *Collector {
 	return &Collector{
-		config:     config,
-		startTime:  time.Now(),
-		buckets10s: make(map[time.Time]*StatsBucket),
-		buckets1m:  make(map[time.Time]*StatsBucket),
-		buckets1h:  make(map[time.Time]*StatsBucket),
+		config:         config,
+		startTime:      time.Now(),
+		buckets10s:     make(map[time.Time]*StatsBucket),
+		buckets1m:      make(map[time.Time]*StatsBucket),
+		buckets1h:      make(map[time.Time]*StatsBucket),
+		bucketsDaily:   make(map[time.Time]*StatsBucket),
+		bucketsWeekly:  make(map[time.Time]*StatsBucket),  // Final tier - deleted after 1 year
 		globalSendersHLL:   hyperloglog.New16(),
 		globalReceiversHLL: hyperloglog.New16(),
 		globalWalletsHLL:   hyperloglog.New16(),
@@ -266,7 +422,7 @@ func (c *Collector) ProcessTransfer(transfer models.Transfer) {
 	
 	// Store asset symbol mapping
 	if transfer.BaseTokenSymbol != "" {
-		c.denomToSymbol[transfer.BaseToken] = transfer.BaseTokenSymbol
+		c.denomToSymbol[transfer.BaseTokenSymbol] = transfer.BaseTokenSymbol
 	}
 	
 	// Periodic cleanup
@@ -276,7 +432,7 @@ func (c *Collector) ProcessTransfer(transfer models.Transfer) {
 	}
 }
 
-// getOrCreateBucket gets or creates a bucket for the given timestamp
+// getOrCreateBucket gets or creates a bucket for the given timestamp using optimized memory pools
 func (c *Collector) getOrCreateBucket(timestamp time.Time, granularity string) *StatsBucket {
 	var buckets map[time.Time]*StatsBucket
 	
@@ -287,30 +443,30 @@ func (c *Collector) getOrCreateBucket(timestamp time.Time, granularity string) *
 		buckets = c.buckets1m
 	case "1h":
 		buckets = c.buckets1h
+	case "daily":
+		buckets = c.bucketsDaily
+	case "weekly":
+		buckets = c.bucketsWeekly
 	default:
 		buckets = c.buckets10s
 	}
 	
 	bucket, exists := buckets[timestamp]
 	if !exists {
-		bucket = &StatsBucket{
-			Timestamp:         timestamp,
-			Granularity:       granularity,
-			Routes:            make(map[string]*RouteStats),
-			ChainOutgoing:     make(map[string]int64),
-			ChainIncoming:     make(map[string]int64),
-			ChainSendersHLL:   make(map[string]*hyperloglog.Sketch),
-			ChainReceiversHLL: make(map[string]*hyperloglog.Sketch),
-			ChainUsersHLL:     make(map[string]*hyperloglog.Sketch),
-			ChainAssets:       make(map[string]map[string]*ChainAssetStats),
-			Senders:           make(map[string]int64),
-			Receivers:         make(map[string]int64),
-			Assets:            make(map[string]*AssetStats),
-			SendersHLL:        hyperloglog.New16(),
-			ReceiversHLL:      hyperloglog.New16(),
-			WalletsHLL:        hyperloglog.New16(),
-		}
+		bucket = getBucketFromPool(timestamp, granularity)
 		buckets[timestamp] = bucket
+	} else {
+		// CRITICAL FIX: Ensure HLL sketches are initialized even for existing buckets
+		// This handles cases where cleanup nullified HLL but bucket remained in map
+		if bucket.SendersHLL == nil {
+			bucket.SendersHLL = getOrCreateOptimizedHLL("bucket")
+		}
+		if bucket.ReceiversHLL == nil {
+			bucket.ReceiversHLL = getOrCreateOptimizedHLL("bucket")
+		}
+		if bucket.WalletsHLL == nil {
+			bucket.WalletsHLL = getOrCreateOptimizedHLL("bucket")
+		}
 	}
 	
 	return bucket
@@ -320,6 +476,11 @@ func (c *Collector) getOrCreateBucket(timestamp time.Time, granularity string) *
 func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) {
 	// Increment transfer count
 	bucket.TransferCount++
+	
+	// Validate addresses before HLL operations
+	if transfer.SenderCanonical == "" || transfer.ReceiverCanonical == "" {
+		return // Skip this transfer if addresses are invalid
+	}
 	
 	// Update route stats
 	routeKey := fmt.Sprintf("%s→%s", transfer.SourceChain.UniversalChainID, transfer.DestinationChain.UniversalChainID)
@@ -344,24 +505,24 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	senderBytes := []byte(strings.ToLower(transfer.SenderCanonical))
 	receiverBytes := []byte(strings.ToLower(transfer.ReceiverCanonical))
 	
-	// Track sender for source chain
+	// Track sender for source chain using optimized HLL precision
 	sourceChainID := transfer.SourceChain.UniversalChainID
 	if bucket.ChainSendersHLL[sourceChainID] == nil {
-		bucket.ChainSendersHLL[sourceChainID] = hyperloglog.New16()
+			bucket.ChainSendersHLL[sourceChainID] = getOrCreateOptimizedHLL("chain")
 	}
 	if bucket.ChainUsersHLL[sourceChainID] == nil {
-		bucket.ChainUsersHLL[sourceChainID] = hyperloglog.New16()
+		bucket.ChainUsersHLL[sourceChainID] = getOrCreateOptimizedHLL("chain")
 	}
 	bucket.ChainSendersHLL[sourceChainID].Insert(senderBytes)
 	bucket.ChainUsersHLL[sourceChainID].Insert(senderBytes)
 	
-	// Track receiver for destination chain
+	// Track receiver for destination chain using optimized HLL precision
 	destChainID := transfer.DestinationChain.UniversalChainID
 	if bucket.ChainReceiversHLL[destChainID] == nil {
-		bucket.ChainReceiversHLL[destChainID] = hyperloglog.New16()
+		bucket.ChainReceiversHLL[destChainID] = getOrCreateOptimizedHLL("chain")
 	}
 	if bucket.ChainUsersHLL[destChainID] == nil {
-		bucket.ChainUsersHLL[destChainID] = hyperloglog.New16()
+		bucket.ChainUsersHLL[destChainID] = getOrCreateOptimizedHLL("chain")
 	}
 	bucket.ChainReceiversHLL[destChainID].Insert(receiverBytes)
 	bucket.ChainUsersHLL[destChainID].Insert(receiverBytes)
@@ -387,10 +548,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	// Update asset stats using same logic as original implementation
 	symbol := transfer.BaseTokenSymbol
 	if symbol == "" {
-		symbol = transfer.BaseToken // fallback to base token
-	}
-	if symbol == "" {
-		symbol = "unknown" // final fallback
+		symbol = "unknown" // fallback if no symbol
 	}
 	
 	var asset *AssetStats
@@ -401,7 +559,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 			AssetName:    symbol, // Use symbol as name initially
 			LastActivity: transfer.TransferSendTimestamp.Format(time.RFC3339),
 			Routes:       make(map[string]*AssetRouteStats),
-			HoldersHLL:   hyperloglog.New16(), // Initialize HLL for unique holder tracking
+			HoldersHLL:   getOrCreateOptimizedHLL("asset"), // Initialize optimized HLL for unique holder tracking
 		}
 		bucket.Assets[symbol] = asset
 	}
@@ -412,7 +570,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	}
 	
 	asset.TransferCount++
-	if amount := parseAmount(transfer.BaseTokenAmountDisplay); amount > 0 {
+	if amount := parseAmount(transfer.BaseAmount); amount > 0 {
 		asset.TotalVolume += amount
 		if amount > asset.LargestTransfer {
 			asset.LargestTransfer = amount
@@ -443,7 +601,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	}
 	
 	assetRoute.Count++
-	if amount := parseAmount(transfer.BaseTokenAmountDisplay); amount > 0 {
+	if amount := parseAmount(transfer.BaseAmount); amount > 0 {
 		assetRoute.Volume += amount
 	}
 	
@@ -453,7 +611,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	}
 	
 	// Track chain-asset relationships
-	amount := parseAmount(transfer.BaseTokenAmountDisplay)
+	amount := parseAmount(transfer.BaseAmount)
 	
 	// Track asset on source chain (outgoing)
 	if bucket.ChainAssets[sourceChainID] == nil {
@@ -465,7 +623,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 			AssetSymbol:  symbol,
 			AssetName:    symbol,
 			LastActivity: transfer.TransferSendTimestamp.Format(time.RFC3339),
-			HoldersHLL:   hyperloglog.New16(),
+			HoldersHLL:   getOrCreateOptimizedHLL("asset"),
 		}
 		bucket.ChainAssets[sourceChainID][symbol] = sourceChainAsset
 	}
@@ -491,7 +649,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 			AssetSymbol:  symbol,
 			AssetName:    symbol,
 			LastActivity: transfer.TransferSendTimestamp.Format(time.RFC3339),
-			HoldersHLL:   hyperloglog.New16(),
+			HoldersHLL:   getOrCreateOptimizedHLL("asset"),
 		}
 		bucket.ChainAssets[destChainID][symbol] = destChainAsset
 	}
@@ -507,7 +665,18 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	destChainAsset.HoldersHLL.Insert(senderBytes)
 	destChainAsset.HoldersHLL.Insert(receiverBytes)
 
-	// Update bucket HLL (reuse the same byte slices from asset tracking)
+	// Ensure bucket HLL sketches are always initialized
+	if bucket.SendersHLL == nil {
+		bucket.SendersHLL = getOrCreateOptimizedHLL("bucket")
+	}
+	if bucket.ReceiversHLL == nil {
+		bucket.ReceiversHLL = getOrCreateOptimizedHLL("bucket")
+	}
+	if bucket.WalletsHLL == nil {
+		bucket.WalletsHLL = getOrCreateOptimizedHLL("bucket")
+	}
+
+	// Update bucket HLL (with validated byte slices)
 	bucket.SendersHLL.Insert(senderBytes)
 	bucket.ReceiversHLL.Insert(receiverBytes)
 	bucket.WalletsHLL.Insert(senderBytes)
@@ -561,8 +730,10 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 	// Calculate transfer rates
 	transferRates := c.calculateTransferRates(now)
 	
-	// Transform to frontend-expected format with percentage changes
-	currentRates := map[string]interface{}{
+
+	
+	// Transform to frontend-expected format with percentage changes  
+	transferRatesForFrontend := map[string]interface{}{
 		"txPerMinute":         float64(transferRates.LastMinute.Transfers),
 		"txPerHour":           float64(transferRates.LastHour.Transfers),
 		"txPerDay":            float64(transferRates.LastDay.Transfers),
@@ -577,7 +748,7 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 		"txPer30DaysChange":   transferRates.Last30Days.TransfersChange,
 		"totalTracked":        transferRates.Total.Transfers,
 		"dataAvailability":    transferRates.DataAvailability,
-		"serverUptimeSeconds": transferRates.Uptime,
+		"serverUptimeSeconds": transferRates.Uptime, // Frontend needs this for uptime display
 	}
 	
 	// Active wallet rates matching frontend expectations with percentage changes
@@ -630,7 +801,7 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 	
 	// Build response matching frontend expectations
 	frontendData := map[string]interface{}{
-		"currentRates":           currentRates,
+		"currentRates":           transferRatesForFrontend,  // REVERT: Keep original key name for backward compatibility
 		"activeWalletRates":      activeWalletRates,
 		"popularRoutes":          topRoutes,
 		"popularRoutesTimeScale": c.getPopularRoutesTimeScale(), // Implement time scale data
@@ -646,7 +817,7 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 			"serverUptimeSeconds": transferRates.Uptime,
 		},
 		"assetVolumeData": c.getAssetVolumeDataForFrontend(now.Add(-time.Minute), transferRates.Uptime), // Use 1-minute rolling window like other components
-		"dataAvailability": transferRates.DataAvailability,
+		"dataAvailability": transferRates.DataAvailability, // Top-level data availability for wallet stats
 	}
 	
 	return frontendData
@@ -658,17 +829,11 @@ func parseAmount(amountStr string) float64 {
 	var amount float64
 	n, err := fmt.Sscanf(amountStr, "%f", &amount)
 	if err != nil || n != 1 {
-		// Debug log parsing issues
-		if amountStr != "" && amountStr != "0" {
-			fmt.Printf("[DEBUG] parseAmount failed: '%s' -> error: %v, parsed: %d\n", amountStr, err, n)
-		}
+		
 		return 0
 	}
 	
-	// Debug log very small amounts that might be getting lost
-	if amount > 0 && amount < 0.000001 {
-		fmt.Printf("[DEBUG] parseAmount very small: '%s' -> %f\n", amountStr, amount)
-	}
+
 	
 	return amount
 }
@@ -746,16 +911,83 @@ func (c *Collector) calculateTransferRates(now time.Time) TransferRates {
 }
 
 // calculateDataAvailability determines what time periods have sufficient data
+// calculateDataAvailability determines what time ranges have sufficient data available
+// Conservative approach: only show data for timeframes where we have adequate system uptime AND data
 func (c *Collector) calculateDataAvailability(now time.Time) DataAvailability {
 	uptime := now.Sub(c.startTime)
 	
+	// Helper function to check if we have adequate data coverage for a timeframe
+	hasSufficientData := func(duration time.Duration, since time.Time) bool {
+		// Must have at least the minimum uptime for this timeframe
+		if uptime < duration {
+			return false
+		}
+		
+		// Count buckets with data in the timeframe to ensure sufficient coverage
+		bucketCount := 0
+		
+		// Check appropriate bucket tier based on timeframe
+		if duration <= time.Hour {
+			// For short timeframes, check 10s and 1m buckets
+			for timestamp := range c.buckets10s {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			for timestamp := range c.buckets1m {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			// Need at least a few buckets for reliable data
+			return bucketCount >= 3
+		} else if duration <= 24*time.Hour {
+			// For medium timeframes, check 1m and 1h buckets  
+			for timestamp := range c.buckets1m {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			for timestamp := range c.buckets1h {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			// Need at least several buckets for daily data
+			return bucketCount >= 6
+		} else {
+			// For long timeframes, check 1h, daily, weekly buckets
+			for timestamp := range c.buckets1h {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			for timestamp := range c.bucketsDaily {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			for timestamp := range c.bucketsWeekly {
+				if timestamp.After(since) {
+					bucketCount++
+				}
+			}
+			// Need meaningful bucket coverage for long-term data
+			if duration <= 7*24*time.Hour {
+				return bucketCount >= 12 // At least half a day of hourly data
+			} else {
+				return bucketCount >= 3 // At least a few daily buckets
+			}
+		}
+	}
+	
 	return DataAvailability{
-		HasMinute: uptime >= time.Minute,
-		HasHour:   uptime >= time.Hour,
-		HasDay:    uptime >= 24*time.Hour,
-		Has7Days:  uptime >= 7*24*time.Hour,
-		Has14Days: uptime >= 14*24*time.Hour,
-		Has30Days: uptime >= 30*24*time.Hour,
+		HasMinute: hasSufficientData(time.Minute, now.Add(-time.Minute)),
+		HasHour:   hasSufficientData(time.Hour, now.Add(-time.Hour)),
+		HasDay:    hasSufficientData(24*time.Hour, now.Add(-24*time.Hour)),
+		Has7Days:  hasSufficientData(7*24*time.Hour, now.Add(-7*24*time.Hour)),
+		Has14Days: hasSufficientData(14*24*time.Hour, now.Add(-14*24*time.Hour)),
+		Has30Days: hasSufficientData(30*24*time.Hour, now.Add(-30*24*time.Hour)),
 	}
 }
 
@@ -763,20 +995,39 @@ func (c *Collector) calculateDataAvailability(now time.Time) DataAvailability {
 func (c *Collector) calculatePeriodStats(since time.Time) PeriodStats {
 	now := time.Now()
 	var transferCount int64
+	var bucketsProcessed int
+	var bucketsWithHLL int
 	
 	// Create temporary HLL sketches for unique counting
-	sendersHLL := hyperloglog.New16()
+	sendersHLL := hyperloglog.New16() // Use higher precision for aggregation
 	receiversHLL := hyperloglog.New16()
 	totalHLL := hyperloglog.New16()
+	
+	// Also track exact unique counts for small datasets (fallback)
+	uniqueSenders := make(map[string]bool)
+	uniqueReceivers := make(map[string]bool)
+	uniqueTotal := make(map[string]bool)
 	
 	// Aggregate from 10-second buckets (most recent data)
 	for timestamp, bucket := range c.buckets10s {
 		if since.IsZero() || timestamp.After(since) {
 			transferCount += bucket.TransferCount
+			bucketsProcessed++
+			
+			// Track exact counts for validation (small dataset handling)
+			for sender := range bucket.Senders {
+				uniqueSenders[sender] = true
+				uniqueTotal[sender] = true
+			}
+			for receiver := range bucket.Receivers {
+				uniqueReceivers[receiver] = true
+				uniqueTotal[receiver] = true
+			}
 			
 			// Merge HLL sketches for unique counting
 			if bucket.SendersHLL != nil {
 				sendersHLL.Merge(bucket.SendersHLL)
+				bucketsWithHLL++
 			}
 			if bucket.ReceiversHLL != nil {
 				receiversHLL.Merge(bucket.ReceiversHLL)
@@ -791,9 +1042,21 @@ func (c *Collector) calculatePeriodStats(since time.Time) PeriodStats {
 	for timestamp, bucket := range c.buckets1m {
 		if (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-time.Hour)) {
 			transferCount += bucket.TransferCount
+			bucketsProcessed++
+			
+			// Track exact counts for validation
+			for sender := range bucket.Senders {
+				uniqueSenders[sender] = true
+				uniqueTotal[sender] = true
+			}
+			for receiver := range bucket.Receivers {
+				uniqueReceivers[receiver] = true
+				uniqueTotal[receiver] = true
+			}
 			
 			if bucket.SendersHLL != nil {
 				sendersHLL.Merge(bucket.SendersHLL)
+				bucketsWithHLL++
 			}
 			if bucket.ReceiversHLL != nil {
 				receiversHLL.Merge(bucket.ReceiversHLL)
@@ -808,9 +1071,21 @@ func (c *Collector) calculatePeriodStats(since time.Time) PeriodStats {
 	for timestamp, bucket := range c.buckets1h {
 		if (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-24*time.Hour)) {
 			transferCount += bucket.TransferCount
+			bucketsProcessed++
+			
+			// Track exact counts for validation
+			for sender := range bucket.Senders {
+				uniqueSenders[sender] = true
+				uniqueTotal[sender] = true
+			}
+			for receiver := range bucket.Receivers {
+				uniqueReceivers[receiver] = true
+				uniqueTotal[receiver] = true
+			}
 			
 			if bucket.SendersHLL != nil {
 				sendersHLL.Merge(bucket.SendersHLL)
+				bucketsWithHLL++
 			}
 			if bucket.ReceiversHLL != nil {
 				receiversHLL.Merge(bucket.ReceiversHLL)
@@ -821,11 +1096,34 @@ func (c *Collector) calculatePeriodStats(since time.Time) PeriodStats {
 		}
 	}
 	
+	// Calculate estimates
+	sendersEstimate := int64(sendersHLL.Estimate())
+	receiversEstimate := int64(receiversHLL.Estimate())
+	totalEstimate := int64(totalHLL.Estimate())
+	
+	// For small datasets, use exact counts if HLL estimates are 0 or too low
+	exactSenders := int64(len(uniqueSenders))
+	exactReceivers := int64(len(uniqueReceivers))
+	exactTotal := int64(len(uniqueTotal))
+	
+	// Use exact counts if they're small or HLL is giving 0
+	if exactSenders <= 100 || sendersEstimate == 0 {
+		sendersEstimate = exactSenders
+	}
+	if exactReceivers <= 100 || receiversEstimate == 0 {
+		receiversEstimate = exactReceivers
+	}
+	if exactTotal <= 100 || totalEstimate == 0 {
+		totalEstimate = exactTotal
+	}
+	
+
+	
 	return PeriodStats{
 		Transfers: transferCount,
-		Senders:   int64(sendersHLL.Estimate()),
-		Receivers: int64(receiversHLL.Estimate()),
-		Total:     int64(totalHLL.Estimate()),
+		Senders:   sendersEstimate,
+		Receivers: receiversEstimate,
+		Total:     totalEstimate,
 	}
 }
 
@@ -1043,22 +1341,22 @@ func (c *Collector) getChainFlows(since time.Time) []ChainFlowStats {
 			chainIncoming[chainID] += count
 		}
 		
-		// Merge HLL sketches
+		// Merge HLL sketches with optimized precision
 		for chainID, hll := range bucket.ChainSendersHLL {
 			if chainSendersHLL[chainID] == nil {
-				chainSendersHLL[chainID] = hyperloglog.New16()
+				chainSendersHLL[chainID] = getOrCreateOptimizedHLL("chain")
 			}
 			chainSendersHLL[chainID].Merge(hll)
 		}
 		for chainID, hll := range bucket.ChainReceiversHLL {
 			if chainReceiversHLL[chainID] == nil {
-				chainReceiversHLL[chainID] = hyperloglog.New16()
+				chainReceiversHLL[chainID] = getOrCreateOptimizedHLL("chain")
 			}
 			chainReceiversHLL[chainID].Merge(hll)
 		}
 		for chainID, hll := range bucket.ChainUsersHLL {
 			if chainUsersHLL[chainID] == nil {
-				chainUsersHLL[chainID] = hyperloglog.New16()
+				chainUsersHLL[chainID] = getOrCreateOptimizedHLL("chain")
 			}
 			chainUsersHLL[chainID].Merge(hll)
 		}
@@ -1217,7 +1515,7 @@ func (c *Collector) getChainFlows(since time.Time) []ChainFlowStats {
 			UniqueSenders:    uniqueSenders,
 			UniqueReceivers:  uniqueReceivers,
 			UniqueUsers:      uniqueUsers,
-			LastActivity:     time.Now().Format(time.RFC3339), // TODO: Track actual last activity
+			LastActivity:     time.Now().Format(time.RFC3339),
 			Percentage:       percentage,
 			TopAssets:        topAssets,
 		})
@@ -1497,7 +1795,7 @@ func (c *Collector) getTopAssets(since time.Time, limit int) []AssetStats {
 			UniqueHolders:   uniqueHolders, // Include unique holder count
 			LastActivity:    asset.LastActivity,
 			TopRoutes:       routes,
-			// TODO: Add percentage changes using previous period data
+		
 		}
 		assets = append(assets, resultAsset)
 		totalVolume += asset.TotalVolume
@@ -1582,19 +1880,29 @@ func (c *Collector) getAssetVolumeDataForFrontend(since time.Time, uptime float6
 	}
 }
 
-// cleanup removes old buckets and aggregates 10s->1m->1h
+// cleanup removes old buckets and aggregates through 5-tier system: 10s->1m->1h->daily->weekly->delete
 func (c *Collector) cleanup() {
 	now := time.Now()
 	
-	// Aggregate 10-second buckets older than 1 hour into 1-minute buckets
-	c.aggregateBuckets(now.Add(-time.Hour), "10s", "1m")
+	// Phase 1: Aggregate 10-second buckets to 1-minute buckets (after 30 minutes)
+	tenSecondCutoff := now.Add(-c.config.TenSecondRetention)
+	c.aggregateBuckets(tenSecondCutoff, "10s", "1m")
 	
-	// Aggregate 1-minute buckets older than 24 hours into 1-hour buckets  
-	c.aggregateBuckets(now.Add(-24*time.Hour), "1m", "1h")
+	// Phase 2: Aggregate 1-minute buckets to 1-hour buckets (after 6 hours)
+	oneMinuteCutoff := now.Add(-c.config.OneMinuteRetention)
+	c.aggregateBuckets(oneMinuteCutoff, "1m", "1h")
 	
-	// Remove buckets older than retention period
-	cutoff := now.Add(-time.Duration(c.config.RetentionHours) * time.Hour)
-	c.removeBucketsOlderThan(cutoff)
+	// Phase 3: Aggregate 1-hour buckets to daily buckets (after 7 days)
+	oneHourCutoff := now.Add(-c.config.OneHourRetention)
+	c.aggregateBuckets(oneHourCutoff, "1h", "daily")
+	
+	// Phase 4: Aggregate daily buckets to weekly buckets (after 30 days)
+	dailyCutoff := now.Add(-c.config.DailyRetention)
+	c.aggregateBuckets(dailyCutoff, "daily", "weekly")
+	
+	// Phase 5: Delete weekly buckets older than 1 year
+	weeklyCutoff := now.Add(-c.config.WeeklyRetention)
+	c.removeBucketsOlderThanWithCleanup(weeklyCutoff)
 }
 
 // aggregateBuckets aggregates buckets from one granularity to another
@@ -1608,6 +1916,12 @@ func (c *Collector) aggregateBuckets(cutoff time.Time, fromGranularity, toGranul
 		sourceBuckets = c.buckets10s
 	case "1m":
 		sourceBuckets = c.buckets1m
+	case "1h":
+		sourceBuckets = c.buckets1h
+	case "daily":
+		sourceBuckets = c.bucketsDaily
+	case "weekly":
+		sourceBuckets = c.bucketsWeekly
 	default:
 		return
 	}
@@ -1619,6 +1933,12 @@ func (c *Collector) aggregateBuckets(cutoff time.Time, fromGranularity, toGranul
 	case "1h":
 		targetBuckets = c.buckets1h
 		aggregationInterval = time.Hour
+	case "daily":
+		targetBuckets = c.bucketsDaily
+		aggregationInterval = 24 * time.Hour
+	case "weekly":
+		targetBuckets = c.bucketsWeekly
+		aggregationInterval = 7 * 24 * time.Hour
 	default:
 		return
 	}
@@ -1646,7 +1966,7 @@ func (c *Collector) aggregateBuckets(cutoff time.Time, fromGranularity, toGranul
 	}
 }
 
-// aggregateStatsBuckets combines multiple stats buckets into one
+// aggregateStatsBuckets combines multiple stats buckets into one with optimized HLL usage
 func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity string) *StatsBucket {
 	result := &StatsBucket{
 		Granularity:       granularity,
@@ -1660,9 +1980,9 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 		Senders:           make(map[string]int64),
 		Receivers:         make(map[string]int64),
 		Assets:            make(map[string]*AssetStats),
-		SendersHLL:        hyperloglog.New16(),
-		ReceiversHLL:      hyperloglog.New16(),
-		WalletsHLL:        hyperloglog.New16(),
+		SendersHLL:        getOrCreateOptimizedHLL("bucket"),
+		ReceiversHLL:      getOrCreateOptimizedHLL("bucket"),
+		WalletsHLL:        getOrCreateOptimizedHLL("bucket"),
 	}
 	
 	for _, bucket := range buckets {
@@ -1697,22 +2017,22 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 			result.ChainIncoming[chainID] += count
 		}
 		
-		// Merge chain HLL sketches
+		// Merge chain HLL sketches with optimized precision
 		for chainID, hll := range bucket.ChainSendersHLL {
 			if result.ChainSendersHLL[chainID] == nil {
-				result.ChainSendersHLL[chainID] = hyperloglog.New16()
+				result.ChainSendersHLL[chainID] = getOrCreateOptimizedHLL("chain")
 			}
 			result.ChainSendersHLL[chainID].Merge(hll)
 		}
 		for chainID, hll := range bucket.ChainReceiversHLL {
 			if result.ChainReceiversHLL[chainID] == nil {
-				result.ChainReceiversHLL[chainID] = hyperloglog.New16()
+				result.ChainReceiversHLL[chainID] = getOrCreateOptimizedHLL("chain")
 			}
 			result.ChainReceiversHLL[chainID].Merge(hll)
 		}
 		for chainID, hll := range bucket.ChainUsersHLL {
 			if result.ChainUsersHLL[chainID] == nil {
-				result.ChainUsersHLL[chainID] = hyperloglog.New16()
+				result.ChainUsersHLL[chainID] = getOrCreateOptimizedHLL("chain")
 			}
 			result.ChainUsersHLL[chainID].Merge(hll)
 		}
@@ -1735,15 +2055,15 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 					if asset.LastActivity > existing.LastActivity {
 						existing.LastActivity = asset.LastActivity
 					}
-					// Merge HLL sketches
+					// Merge HLL sketches with optimized precision
 					if asset.HoldersHLL != nil {
 						if existing.HoldersHLL == nil {
-							existing.HoldersHLL = hyperloglog.New16()
+							existing.HoldersHLL = getOrCreateOptimizedHLL("asset")
 						}
 						existing.HoldersHLL.Merge(asset.HoldersHLL)
 					}
 				} else {
-					// Create new aggregate
+					// Create new aggregate with optimized HLL
 					newAsset := &ChainAssetStats{
 						AssetSymbol:   asset.AssetSymbol,
 						AssetName:     asset.AssetName,
@@ -1753,7 +2073,7 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 						TotalVolume:   asset.TotalVolume,
 						AverageAmount: asset.AverageAmount,
 						LastActivity:  asset.LastActivity,
-						HoldersHLL:    hyperloglog.New16(),
+						HoldersHLL:    getOrCreateOptimizedHLL("asset"),
 					}
 					if asset.HoldersHLL != nil {
 						newAsset.HoldersHLL.Merge(asset.HoldersHLL)
@@ -1786,10 +2106,10 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 					existing.LastActivity = asset.LastActivity
 				}
 				
-				// Merge HLL sketches for unique holder counting
+				// Merge HLL sketches for unique holder counting with optimized precision
 				if asset.HoldersHLL != nil {
 					if existing.HoldersHLL == nil {
-						existing.HoldersHLL = hyperloglog.New16()
+						existing.HoldersHLL = getOrCreateOptimizedHLL("asset")
 					}
 					existing.HoldersHLL.Merge(asset.HoldersHLL)
 				}
@@ -1829,7 +2149,7 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 					AverageAmount:   asset.AverageAmount,
 					LastActivity:    asset.LastActivity,
 					Routes:          make(map[string]*AssetRouteStats), // Initialize Routes map
-					HoldersHLL:      hyperloglog.New16(), // Initialize HLL for aggregation
+					HoldersHLL:      getOrCreateOptimizedHLL("asset"), // Initialize optimized HLL for aggregation
 				}
 				
 				// Copy HLL data if available
@@ -1892,31 +2212,102 @@ func (c *Collector) removeBucketsOlderThan(cutoff time.Time) {
 			delete(c.buckets1h, timestamp)
 		}
 	}
+	
+	// Clean daily buckets
+	for timestamp := range c.bucketsDaily {
+		if timestamp.Before(cutoff) {
+			delete(c.bucketsDaily, timestamp)
+		}
+	}
+	
+	// Clean weekly buckets
+	for timestamp := range c.bucketsWeekly {
+		if timestamp.Before(cutoff) {
+			delete(c.bucketsWeekly, timestamp)
+		}
+	}
+}
+
+// removeBucketsOlderThanWithCleanup removes buckets older than cutoff time and returns them to memory pools
+func (c *Collector) removeBucketsOlderThanWithCleanup(cutoff time.Time) {
+	// Clean 10-second buckets with proper pool return
+	for timestamp, bucket := range c.buckets10s {
+		if timestamp.Before(cutoff) {
+			returnBucketToPool(bucket)
+			delete(c.buckets10s, timestamp)
+		}
+	}
+	
+	// Clean 1-minute buckets with proper pool return
+	for timestamp, bucket := range c.buckets1m {
+		if timestamp.Before(cutoff) {
+			returnBucketToPool(bucket)
+			delete(c.buckets1m, timestamp)
+		}
+	}
+	
+	// Clean 1-hour buckets with proper pool return
+	for timestamp, bucket := range c.buckets1h {
+		if timestamp.Before(cutoff) {
+			returnBucketToPool(bucket)
+			delete(c.buckets1h, timestamp)
+		}
+	}
+	
+	// Clean daily buckets with proper pool return
+	for timestamp, bucket := range c.bucketsDaily {
+		if timestamp.Before(cutoff) {
+			returnBucketToPool(bucket)
+			delete(c.bucketsDaily, timestamp)
+		}
+	}
+	
+	// Clean weekly buckets with proper pool return
+	for timestamp, bucket := range c.bucketsWeekly {
+		if timestamp.Before(cutoff) {
+			returnBucketToPool(bucket)
+			delete(c.bucketsWeekly, timestamp)
+		}
+	}
 }
 
 // aggregateBucketsForPeriod returns all buckets that should be included for a given time period
-// This ensures consistent bucket selection across all aggregation methods
+// This ensures consistent bucket selection across all aggregation methods using the 4-tier system
 func (c *Collector) aggregateBucketsForPeriod(since time.Time) []*StatsBucket {
 	now := time.Now()
 	var buckets []*StatsBucket
 	
-	// Include 10-second buckets (most recent data)
+	// Include 10-second buckets (most recent data: 0-30min)
 	for timestamp, bucket := range c.buckets10s {
 		if bucket != nil && (since.IsZero() || timestamp.After(since)) {
 			buckets = append(buckets, bucket)
 		}
 	}
 	
-	// Include 1-minute buckets for older data (beyond 1 hour)
+	// Include 1-minute buckets (recent data: 30min-6h)
 	for timestamp, bucket := range c.buckets1m {
-		if bucket != nil && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-time.Hour)) {
+		if bucket != nil && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.TenSecondRetention)) {
 			buckets = append(buckets, bucket)
 		}
 	}
 	
-	// Include 1-hour buckets for oldest data (beyond 1 day)
+	// Include 1-hour buckets (medium-term data: 6h-7d)
 	for timestamp, bucket := range c.buckets1h {
-		if bucket != nil && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-24*time.Hour)) {
+		if bucket != nil && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.OneMinuteRetention)) {
+			buckets = append(buckets, bucket)
+		}
+	}
+	
+	// Include daily buckets (medium-term data: 7d-30d)
+	for timestamp, bucket := range c.bucketsDaily {
+		if bucket != nil && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.OneHourRetention)) {
+			buckets = append(buckets, bucket)
+		}
+	}
+	
+	// Include weekly buckets (final tier: 30d-1y, then delete)
+	for timestamp, bucket := range c.bucketsWeekly {
+		if bucket != nil && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.DailyRetention)) {
 			buckets = append(buckets, bucket)
 		}
 	}
@@ -2044,14 +2435,14 @@ func (c *Collector) getAssetVolumeTimeScale() map[string]interface{} {
 			return c.getTopAssetsFromBuckets(since, now, []string{"1h"}, c.config.TopItemsTimeScale)
 		},
 		"14d": func() []AssetStats {
-			// Last 14 days: use 1h buckets
+			// Last 14 days: use daily buckets for long-term data, fallback to 1h buckets for recent data
 			since := now.Add(-14 * 24 * time.Hour)
-			return c.getTopAssetsFromBuckets(since, now, []string{"1h"}, c.config.TopItemsTimeScale)
+			return c.getTopAssetsFromBuckets(since, now, []string{"daily", "1h"}, c.config.TopItemsTimeScale)
 		},
 		"30d": func() []AssetStats {
-			// Last 30 days: use 1h buckets
+			// Last 30 days: use daily buckets for long-term data, fallback to 1h buckets for recent data
 			since := now.Add(-30 * 24 * time.Hour)
-			return c.getTopAssetsFromBuckets(since, now, []string{"1h"}, c.config.TopItemsTimeScale)
+			return c.getTopAssetsFromBuckets(since, now, []string{"daily", "1h"}, c.config.TopItemsTimeScale)
 		},
 	}
 	
@@ -2111,6 +2502,10 @@ func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularitie
 			buckets = c.buckets1m
 		case "1h":
 			buckets = c.buckets1h
+		case "daily":
+			buckets = c.bucketsDaily
+		case "weekly":
+			buckets = c.bucketsWeekly
 		default:
 			continue
 		}
@@ -2131,10 +2526,10 @@ func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularitie
 							existing.LastActivity = asset.LastActivity
 						}
 						
-						// Merge HLL sketches for unique holder counting
+						// Merge HLL sketches for unique holder counting with optimized precision
 						if asset.HoldersHLL != nil {
 							if existing.HoldersHLL == nil {
-								existing.HoldersHLL = hyperloglog.New16()
+								existing.HoldersHLL = getOrCreateOptimizedHLL("asset")
 							}
 							existing.HoldersHLL.Merge(asset.HoldersHLL)
 						}
@@ -2164,7 +2559,7 @@ func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularitie
 							}
 						}
 					} else {
-						// Create new aggregate
+						// Create new aggregate with optimized HLL
 						newAsset := &AssetStats{
 							AssetSymbol:     asset.AssetSymbol,
 							AssetName:       asset.AssetName,
@@ -2173,7 +2568,7 @@ func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularitie
 							LargestTransfer: asset.LargestTransfer,
 							LastActivity:    asset.LastActivity,
 							Routes:          make(map[string]*AssetRouteStats),
-							HoldersHLL:      hyperloglog.New16(), // Initialize HLL for aggregation
+							HoldersHLL:      getOrCreateOptimizedHLL("asset"), // Initialize optimized HLL for aggregation
 						}
 						
 						// Copy HLL data if available

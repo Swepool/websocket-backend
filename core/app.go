@@ -99,8 +99,7 @@ func (a *App) Start() error {
 		}
 	}()
 	
-	// TODO: Start Thread 2 (Stats), Thread 3 (Charts), Thread 4 (Clients)
-	// For now, we have a minimal working version with just the main flow + HTTP
+	// Minimal working version with main flow + HTTP
 	
 	log.Printf("✅ All threads started successfully")
 	log.Printf("👀 Watch the logs to see live transfers being processed!")

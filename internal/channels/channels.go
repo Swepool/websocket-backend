@@ -1,6 +1,6 @@
 package channels
 
-import "websocket-backend-new/internal/models"
+import "websocket-backend-new/models"
 
 // Channels holds all communication channels for the pipeline
 type Channels struct {

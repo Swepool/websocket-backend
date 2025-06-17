@@ -1,6 +1,5 @@
 <script lang="ts">
   import { chains } from "$lib/stores/chains.svelte"
-  import { itemCounts, selectedItemCount } from "$lib/stores/chartSettings"
   import { Option } from "effect"
   import Card from "./ui/Card.svelte"
   import Skeleton from "./ui/Skeleton.svelte"
@@ -75,11 +74,21 @@
     chainFlowData = DEFAULT_CHAIN_DATA,
     dataAvailability = DEFAULT_DATA_AVAILABILITY,
   }: Props = $props()
+
+  // Local item count configuration
+  const itemCounts = [
+    { value: 3, label: "3" },
+    { value: 5, label: "5" },
+    { value: 7, label: "7" },
+    { value: 10, label: "10" },
+  ]
   
   // State management
   let selectedTimeScale = $state("1m")
   let displayMode = $state<"total" | "outgoing" | "incoming" | "netflow">("total")
   let expandedChain = $state<string | null>(null)
+  let hoveredChain = $state<string | null>(null)
+  let selectedItemCount = $state(5) // Default to 5 items
   
   // Time scale configuration
   const timeScales = [
@@ -130,7 +139,7 @@
     })
   
     // Limit to selected number for display
-    return sortedData?.slice(0, $selectedItemCount) || []
+    return sortedData?.slice(0, selectedItemCount) || []
   })
   
   // Derived state
@@ -238,6 +247,25 @@
   function toggleChainExpansion(chainId: string): void {
     expandedChain = expandedChain === chainId ? null : chainId
   }
+
+  // Check if chain should show colored bars (expanded, hovered, or parent of expanded)
+  function shouldShowColoredBars(chainId: string): boolean {
+    return expandedChain === chainId || hoveredChain === chainId
+  }
+
+  // Get bar colors based on state
+  function getBarColors(chainId: string): { incoming: string, outgoing: string } {
+    if (shouldShowColoredBars(chainId)) {
+      return {
+        incoming: 'bg-green-400',
+        outgoing: 'bg-red-400'
+      }
+    }
+    return {
+      incoming: 'bg-zinc-400',
+      outgoing: 'bg-zinc-500'
+    }
+  }
   
   // Calculate incoming/outgoing widths for assets 
   function getAssetIncomingOutgoingWidths(asset: ChainAsset, totalChars: number = 50): { incomingWidth: number, outgoingWidth: number } {
@@ -294,18 +322,7 @@
     return Math.round((displayValue / total) * 100)
   }
   
-  // Debug logging in development
-  $effect(() => {
-    if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
-      console.log('ChainFlowChart data:', {
-        chainFlowData,
-        hasData,
-        isLoading,
-        currentDataLength: currentData.length,
-        chainsLength: chainFlowData.chains?.length || 0
-      })
-    }
-  })
+
 </script>
 
 <Card class="h-full p-0">
@@ -358,11 +375,11 @@
             {#each itemCounts as itemCount}
               <button
                 class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
-                  $selectedItemCount === itemCount.value
+                  selectedItemCount === itemCount.value
                     ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
                     : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
                 }"
-                onclick={() => selectedItemCount.set(itemCount.value)}
+                onclick={() => selectedItemCount = itemCount.value}
               >
                 {itemCount.label}
               </button>
@@ -399,7 +416,7 @@
         {#if isLoading}
           <!-- Loading State -->
           <div class="space-y-0.5 flex-1">
-            {#each Array($selectedItemCount) as _, index}
+            {#each Array(selectedItemCount) as _, index}
               <div class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                 <div class="flex items-center justify-between mb-0.5">
                   <div class="flex items-center space-x-1">
@@ -451,8 +468,10 @@
               <article class="bg-zinc-900 border border-zinc-800 rounded transition-colors">
                 <!-- Main Chain Row -->
                 <button
-                  class="w-full p-1.5 text-left hover:bg-zinc-800 transition-colors"
+                  class="w-full p-2 sm:p-1.5 text-left hover:bg-zinc-800 transition-colors"
                   onclick={() => toggleChainExpansion(chain.universal_chain_id)}
+                  onmouseenter={() => hoveredChain = chain.universal_chain_id}
+                  onmouseleave={() => hoveredChain = null}
                   aria-expanded={expandedChain === chain.universal_chain_id}
                   aria-controls="assets-{chain.universal_chain_id}"
                 >
@@ -505,7 +524,7 @@
                         <!-- Incoming side (left, green) -->
                         {#if getIncomingOutgoingWidths(chain, 50).incomingWidth > 0}
                           <div 
-                            class="bg-green-400 h-full" 
+                            class="{getBarColors(chain.universal_chain_id).incoming} h-full transition-colors duration-300" 
                             style="width: {(getIncomingOutgoingWidths(chain, 50).incomingWidth / 50) * 100}%"
                             title="Incoming: {chain.incomingCount}"
                           ></div>
@@ -513,7 +532,7 @@
                         <!-- Outgoing side (right, red) -->
                         {#if getIncomingOutgoingWidths(chain, 50).outgoingWidth > 0}
                           <div 
-                            class="bg-red-400 h-full" 
+                            class="{getBarColors(chain.universal_chain_id).outgoing} h-full transition-colors duration-300" 
                             style="width: {(getIncomingOutgoingWidths(chain, 50).outgoingWidth / 50) * 100}%"
                             title="Outgoing: {chain.outgoingCount}"
                           ></div>
@@ -523,7 +542,7 @@
                         <!-- Incoming side (left, green) -->
                         {#if getIncomingOutgoingWidths(chain, 25).incomingWidth > 0}
                           <div 
-                            class="bg-green-400 h-full" 
+                            class="{getBarColors(chain.universal_chain_id).incoming} h-full transition-colors duration-300" 
                             style="width: {(getIncomingOutgoingWidths(chain, 25).incomingWidth / 25) * 100}%"
                             title="Incoming: {chain.incomingCount}"
                           ></div>
@@ -531,7 +550,7 @@
                         <!-- Outgoing side (right, red) -->
                         {#if getIncomingOutgoingWidths(chain, 25).outgoingWidth > 0}
                           <div 
-                            class="bg-red-400 h-full" 
+                            class="{getBarColors(chain.universal_chain_id).outgoing} h-full transition-colors duration-300" 
                             style="width: {(getIncomingOutgoingWidths(chain, 25).outgoingWidth / 25) * 100}%"
                             title="Outgoing: {chain.outgoingCount}"
                           ></div>
@@ -597,11 +616,11 @@
                           <!-- Asset Flow Bar (Incoming/Outgoing) -->
                           <div class="flex items-center">
                             <div class="flex-1 flex min-w-0">
-                              <div class="hidden md:flex w-full h-1">
+                              <div class="hidden sm:flex w-full h-1">
                                 <!-- Incoming side (left, green) -->
                                 {#if getAssetIncomingOutgoingWidths(asset, 50).incomingWidth > 0}
                                   <div 
-                                    class="bg-green-400 h-full" 
+                                    class="{getBarColors(chain.universal_chain_id).incoming} h-full transition-colors duration-300" 
                                     style="width: {(getAssetIncomingOutgoingWidths(asset, 50).incomingWidth / 50) * 100}%"
                                     title="Incoming: {asset.incomingCount}"
                                   ></div>
@@ -609,17 +628,17 @@
                                 <!-- Outgoing side (right, red) -->
                                 {#if getAssetIncomingOutgoingWidths(asset, 50).outgoingWidth > 0}
                                   <div 
-                                    class="bg-red-400 h-full" 
+                                    class="{getBarColors(chain.universal_chain_id).outgoing} h-full transition-colors duration-300" 
                                     style="width: {(getAssetIncomingOutgoingWidths(asset, 50).outgoingWidth / 50) * 100}%"
                                     title="Outgoing: {asset.outgoingCount}"
                                   ></div>
                                 {/if}
                               </div>
-                              <div class="flex md:hidden w-full h-1">
+                              <div class="flex sm:hidden w-full h-1.5">
                                 <!-- Incoming side (left, green) -->
                                 {#if getAssetIncomingOutgoingWidths(asset, 25).incomingWidth > 0}
                                   <div 
-                                    class="bg-green-400 h-full" 
+                                    class="{getBarColors(chain.universal_chain_id).incoming} h-full transition-colors duration-300" 
                                     style="width: {(getAssetIncomingOutgoingWidths(asset, 25).incomingWidth / 25) * 100}%"
                                     title="Incoming: {asset.incomingCount}"
                                   ></div>
@@ -627,7 +646,7 @@
                                 <!-- Outgoing side (right, red) -->
                                 {#if getAssetIncomingOutgoingWidths(asset, 25).outgoingWidth > 0}
                                   <div 
-                                    class="bg-red-400 h-full" 
+                                    class="{getBarColors(chain.universal_chain_id).outgoing} h-full transition-colors duration-300" 
                                     style="width: {(getAssetIncomingOutgoingWidths(asset, 25).outgoingWidth / 25) * 100}%"
                                     title="Outgoing: {asset.outgoingCount}"
                                   ></div>

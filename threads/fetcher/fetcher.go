@@ -61,7 +61,7 @@ func (f *Fetcher) Start(ctx context.Context) {
 
 // fetchAndSend fetches new transfers and sends them for enhancement
 func (f *Fetcher) fetchAndSend(ctx context.Context) {
-	// Step 1: Fetch raw transfers
+	// Fetch raw transfers
 	transfers, err := f.FetchNewTransfers(ctx)
 	if err != nil {
 		log.Printf("[THREAD-1] ❌ Failed to fetch transfers: %v", err)
@@ -74,7 +74,7 @@ func (f *Fetcher) fetchAndSend(ctx context.Context) {
 	
 	log.Printf("[THREAD-1] 📥 Fetched %d new transfers, sending for enhancement", len(transfers))
 	
-	// Step 2: Send to enhancer (non-blocking)
+	// Send to enhancer (non-blocking)
 	select {
 	case f.channels.RawTransfers <- transfers:
 		log.Printf("[THREAD-1] ✅ Sent %d transfers for enhancement", len(transfers))

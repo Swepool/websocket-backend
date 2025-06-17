@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/models"
+	"websocket-backend-new/models"
 )
 
 // Config holds scheduler configuration
@@ -46,16 +46,13 @@ func NewScheduler(config Config, channels *channels.Channels) *Scheduler {
 
 // Start begins the scheduler thread
 func (s *Scheduler) Start(ctx context.Context) {
-	fmt.Printf("[SCHEDULER] Starting with natural timing (%v - %v + %v jitter)\n", 
-		s.config.MinDelay, s.config.MaxDelay, s.config.JitterRange)
-	
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[SCHEDULER] Shutting down\n")
 			return
 			
 		case transfers := <-s.channels.EnhancedTransfers:
+			fmt.Printf("[SCHEDULER] Received %d enhanced transfers from enhancer\n", len(transfers))
 			s.processTransferBatch(transfers)
 		}
 	}
@@ -66,8 +63,6 @@ func (s *Scheduler) processTransferBatch(transfers []models.Transfer) {
 	if len(transfers) == 0 {
 		return
 	}
-	
-	fmt.Printf("[SCHEDULER] Processing batch of %d transfers with natural streaming\n", len(transfers))
 	
 	// Process each transfer sequentially to maintain proper timing order
 	go func() {
@@ -92,19 +87,14 @@ func (s *Scheduler) sendTransferWithTiming(transfer models.Transfer) {
 	// Send to broadcaster (stats are handled by enhancer at true fetch rate)
 	select {
 	case s.channels.TransferBroadcasts <- transfer:
-		// Successfully sent to broadcaster
+		fmt.Printf("[SCHEDULER] Sent transfer %s to broadcaster\n", transfer.PacketHash)
 	default:
-		fmt.Printf("[SCHEDULER] Warning: Broadcaster channel full, dropping transfer %s\n", transfer.PacketHash)
+		fmt.Printf("[SCHEDULER] Warning: broadcaster channel full, dropping transfer %s\n", transfer.PacketHash)
 	}
 	
 	s.mu.Lock()
 	s.totalSent++
-	currentTotal := s.totalSent
 	s.mu.Unlock()
-	
-	if currentTotal%100 == 0 {
-		fmt.Printf("[SCHEDULER] Sent %d transfers with natural timing to broadcaster\n", currentTotal)
-	}
 }
 
 // GetStats returns scheduler statistics

@@ -8,10 +8,9 @@ import (
 	"math/big"
 	"math/rand"
 	"net/http"
-	"strings"
 	"time"
 	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/models"
+	"websocket-backend-new/models"
 )
 
 // Config holds fetcher configuration
@@ -34,7 +33,7 @@ func DefaultConfig() Config {
 
 // ChainProvider interface for getting chain data
 type ChainProvider interface {
-	GetAllChains() []models.ChainInfo
+	GetAllChains() []models.Chain
 }
 
 // Fetcher handles fetching transfers from the GraphQL API
@@ -61,8 +60,7 @@ func NewFetcher(config Config, channels *channels.Channels, chainProvider ChainP
 
 // Start begins the fetcher thread
 func (f *Fetcher) Start(ctx context.Context) {
-	fmt.Printf("[FETCHER] Starting with %v poll interval (mock mode: %v)\n", 
-		f.config.PollInterval, f.config.MockMode)
+	
 	
 	ticker := time.NewTicker(f.config.PollInterval)
 	defer ticker.Stop()
@@ -70,7 +68,6 @@ func (f *Fetcher) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[FETCHER] Shutting down\n")
 			return
 			
 		case <-ticker.C:
@@ -89,31 +86,19 @@ func (f *Fetcher) fetchAndSend() {
 	} else {
 		transfers, err = f.fetchRealTransfers()
 		if err != nil {
-			fmt.Printf("[FETCHER] Error fetching real transfers: %v\n", err)
 			return
 		}
 	}
 	
 	if len(transfers) > 0 {
-		// Send to scheduler for natural timing and broadcasting
+		fmt.Printf("[FETCHER] Generated %d transfers, sending to enhancer\n", len(transfers))
+		// Send raw transfers to enhancer for processing
 		select {
-		case f.channels.EnhancedTransfers <- transfers:
-			fmt.Printf("[FETCHER] Sent batch of %d transfers to scheduler\n", len(transfers))
+		case f.channels.RawTransfers <- transfers:
+			fmt.Printf("[FETCHER] Successfully sent %d transfers to enhancer\n", len(transfers))
 		default:
-			fmt.Printf("[FETCHER] Warning: Scheduler channel full, dropping batch of %d transfers\n", len(transfers))
+			fmt.Printf("[FETCHER] Warning: enhancer channel full, dropping %d transfers\n", len(transfers))
 		}
-		
-		// ALSO send each transfer to stats collector (at true fetch rate)
-		for _, transfer := range transfers {
-			select {
-			case f.channels.StatsUpdates <- transfer:
-				// Successfully sent to stats
-			default:
-				fmt.Printf("[FETCHER] Warning: Stats channel full, dropping stats for transfer %s\n", transfer.PacketHash)
-			}
-		}
-		
-		fmt.Printf("[FETCHER] Sent %d transfers to stats collector at true fetch rate\n", len(transfers))
 	}
 }
 
@@ -121,6 +106,7 @@ func (f *Fetcher) fetchAndSend() {
 func (f *Fetcher) generateMockTransfers() []models.Transfer {
 	// Get real chains from the chain provider
 	availableChains := f.chainProvider.GetAllChains()
+	fmt.Printf("[FETCHER] Available chains for mock data: %d\n", len(availableChains))
 	if len(availableChains) < 2 {
 		fmt.Printf("[FETCHER] Not enough chains available (%d), skipping mock generation\n", len(availableChains))
 		return []models.Transfer{}
@@ -175,9 +161,8 @@ func (f *Fetcher) generateMockTransfers() []models.Transfer {
 				RpcType:          destChain.RpcType,
 				AddrPrefix:       destChain.AddrPrefix,
 			},
-			BaseToken:              fmt.Sprintf("u%s", strings.ToLower(tokenSymbol)),
-			BaseTokenSymbol:        tokenSymbol,
-			BaseTokenAmountDisplay: amount,
+			BaseAmount:      amount,
+			BaseTokenSymbol: tokenSymbol,
 		}
 	}
 	
@@ -394,9 +379,8 @@ func (f *Fetcher) fetchRealTransfers() ([]models.Transfer, error) {
 				RpcType:          raw.DestinationChain.RpcType,
 				AddrPrefix:       raw.DestinationChain.AddrPrefix,
 			},
-			BaseToken:              raw.BaseToken,
-			BaseTokenSymbol:        raw.BaseTokenSymbol,
-			BaseTokenAmountDisplay: displayAmount,
+			BaseAmount:       displayAmount,
+			BaseTokenSymbol:  raw.BaseTokenSymbol,
 		}
 	}
 	

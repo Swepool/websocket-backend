@@ -1,5 +1,4 @@
 <script lang="ts">
-    import { itemCounts, selectedItemCount } from "$lib/stores/chartSettings"
     import Card from "./ui/Card.svelte"
     import Skeleton from "./ui/Skeleton.svelte"
   
@@ -73,10 +72,20 @@
       assetVolumeData = DEFAULT_ASSET_DATA,
       dataAvailability = DEFAULT_DATA_AVAILABILITY,
     }: Props = $props()
+
+    // Local item count configuration
+    const itemCounts = [
+      { value: 3, label: "3" },
+      { value: 5, label: "5" },
+      { value: 7, label: "7" },
+      { value: 10, label: "10" },
+    ]
   
     // State management
     let selectedTimeScale = $state("1m")
     let expandedAsset = $state<string | null>(null)
+    let hoveredAsset = $state<string | null>(null)
+    let selectedItemCount = $state(5) // Default to 5 items
   
     // Time scale configuration
     const timeScales = [
@@ -107,9 +116,19 @@
   
     // Derived state
     const currentData = $derived.by(() => {
-      const data = assetVolumeData?.assets || []
+      // Use time scale specific data if available, otherwise fall back to default assets
+      let data: Asset[] = []
+      
+      if (assetVolumeData?.assetVolumeTimeScale?.[selectedTimeScale]) {
+        // Use time scale specific data (already in correct format from backend)
+        data = assetVolumeData.assetVolumeTimeScale[selectedTimeScale] as Asset[]
+      } else if (selectedTimeScale === "1m" && assetVolumeData?.assets) {
+        // Fallback to default assets array for 1m timeframe
+        data = assetVolumeData.assets
+      }
+      
       const sortedData = [...data].sort((a, b) => b.transferCount - a.transferCount)
-      return sortedData.slice(0, $selectedItemCount)
+      return sortedData.slice(0, selectedItemCount)
     })
   
     const hasData = $derived(currentData.length > 0)
@@ -156,22 +175,71 @@
     }
   
     function isTimeFrameAvailable(timeFrameKey: string): boolean {
-      // For now, always return true for 1m since that's what we're using
-      // TODO: Implement proper time scale data availability based on dataAvailability prop
-      return timeFrameKey === "1m"
+      // Check if we have data availability information
+      if (!dataAvailability) return false
+      
+      // Map timeframe keys to dataAvailability fields  
+      const availabilityMap: Record<string, boolean> = {
+        "1m": dataAvailability.hasMinute,
+        "1h": dataAvailability.hasHour, 
+        "1d": dataAvailability.hasDay,
+        "7d": dataAvailability.has7Days,
+        "14d": dataAvailability.has14Days,
+        "30d": dataAvailability.has30Days,
+      }
+      
+      // Check both data availability and actual time scale data
+      const hasDataAvailability = availabilityMap[timeFrameKey] || false
+      const hasTimeScaleData = assetVolumeData?.assetVolumeTimeScale?.[timeFrameKey] !== undefined
+      
+      return hasDataAvailability || hasTimeScaleData
     }
   
     function getFirstAvailableTimeframe(): string {
+      // Try to find the first available timeframe in order of recency
       for (const timeScale of timeScales) {
         if (isTimeFrameAvailable(timeScale.key)) {
           return timeScale.key
         }
       }
+      // If nothing is available, default to 1m
       return "1m"
     }
   
     function toggleAssetExpansion(assetSymbol: string): void {
       expandedAsset = expandedAsset === assetSymbol ? null : assetSymbol
+    }
+
+    // Check if asset should show colored bars (expanded or hovered)
+    function shouldShowColoredBars(assetSymbol: string): boolean {
+      return expandedAsset === assetSymbol || hoveredAsset === assetSymbol
+    }
+
+    // Get route colors based on state - grayscale by default, colored when focused
+    function getRouteColors(assetSymbol: string): string[] {
+      if (shouldShowColoredBars(assetSymbol)) {
+        return routeColors as unknown as string[]
+      }
+      return [
+        'bg-zinc-400', 
+        'bg-zinc-500', 
+        'bg-zinc-600', 
+        'bg-zinc-500', 
+        'bg-zinc-400'
+      ]
+    }
+
+    function getRouteColorsBright(assetSymbol: string): string[] {
+      if (shouldShowColoredBars(assetSymbol)) {
+        return routeColorsBright as unknown as string[]
+      }
+      return [
+        'bg-zinc-300', 
+        'bg-zinc-400', 
+        'bg-zinc-500', 
+        'bg-zinc-400', 
+        'bg-zinc-300'
+      ]
     }
   
     function calculateRemainingRoutePercentage(routes: AssetRoute[]): number {
@@ -186,19 +254,7 @@
       }
     })
   
-    // Debug logging in development
-    $effect(() => {
-      if (import.meta.env.DEV) {
-        console.log('AssetVolumeChart data:', {
-          hasData,
-          isLoading,
-          currentDataLength: currentData.length,
-          assetsLength: assetVolumeData?.assets?.length || 0,
-          totalAssets: assetVolumeData?.totalAssets || 0,
-          selectedItemCount: $selectedItemCount
-        })
-      }
-    })
+
   </script>
   
   <Card class="h-full p-0">
@@ -248,11 +304,11 @@
             {#each itemCounts as itemCount}
               <button
                 class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
-                  $selectedItemCount === itemCount.value
+                  selectedItemCount === itemCount.value
                     ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
                     : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
                 }"
-                onclick={() => selectedItemCount.set(itemCount.value)}
+                onclick={() => selectedItemCount = itemCount.value}
               >
                 {itemCount.label}
               </button>
@@ -271,7 +327,7 @@
           {#if isLoading}
             <!-- Loading State -->
             <div class="space-y-0.5 flex-1">
-              {#each Array($selectedItemCount) as _, index}
+              {#each Array(selectedItemCount) as _, index}
                 <div class="p-1.5 bg-zinc-900 border border-zinc-800 rounded">
                   <div class="flex items-center justify-between mb-0.5">
                     <div class="flex items-center space-x-1">
@@ -308,8 +364,10 @@
                 <article class="bg-zinc-900 border border-zinc-800 rounded transition-colors">
                   <!-- Main Asset Row -->
                   <button 
-                    class="w-full p-1.5 text-left hover:bg-zinc-800 transition-colors"
+                    class="w-full p-2 sm:p-1.5 text-left hover:bg-zinc-800 transition-colors"
                     onclick={() => toggleAssetExpansion(asset.assetSymbol)}
+                    onmouseenter={() => hoveredAsset = asset.assetSymbol}
+                    onmouseleave={() => hoveredAsset = null}
                     aria-expanded={expandedAsset === asset.assetSymbol}
                     aria-controls="routes-{asset.assetSymbol}"
                   >
@@ -348,14 +406,14 @@
                         <div class="flex-1 flex min-w-0 h-1.5 sm:h-1">
                           {#each asset.topRoutes.slice(0, 5) as route, routeIndex}
                             <div 
-                              class="h-full {routeColors[routeIndex]} transition-all duration-300"
+                              class="h-full {getRouteColors(asset.assetSymbol)[routeIndex]} transition-all duration-300"
                               style="width: {route.percentage}%"
                               title="{route.route}: {route.percentage.toFixed(1)}%"
                             ></div>
                           {/each}
                           {#if asset.topRoutes.length > 5}
                             <div 
-                              class="h-full bg-zinc-600 transition-all duration-300"
+                              class="h-full {shouldShowColoredBars(asset.assetSymbol) ? 'bg-zinc-600' : 'bg-zinc-500'} transition-all duration-300"
                               style="width: {calculateRemainingRoutePercentage(asset.topRoutes)}%"
                               title="Other routes: {calculateRemainingRoutePercentage(asset.topRoutes).toFixed(1)}%"
                             ></div>
@@ -409,7 +467,7 @@
                             <div class="flex items-center space-x-2">
                               <div class="flex-1 flex min-w-0 h-1.5 sm:h-1">
                                 <div 
-                                  class="h-full {routeColorsBright[routeIndex % routeColorsBright.length]} transition-all duration-300"
+                                  class="h-full {getRouteColorsBright(asset.assetSymbol)[routeIndex % getRouteColorsBright(asset.assetSymbol).length]} transition-all duration-300"
                                   style="width: {route.percentage}%"
                                 ></div>
                                 <div 

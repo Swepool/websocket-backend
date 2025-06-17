@@ -36,7 +36,7 @@ func NewClient(endpoint string) *Client {
 // GraphQL queries matching the old system
 const (
 	latestTransfersQuery = `
-		query TransferListLatest($limit: Int!, $network: String) {
+		query TransferListLatest($limit: Int!, $network: [String!]) {
 			v2_transfers(args: {
 				p_limit: $limit,
 				p_network: $network
@@ -67,15 +67,13 @@ const (
 				base_token_symbol
 				base_token_decimals
 				sort_order
-				transfer_send_transaction_hash
-				transfer_recv_timestamp
 				packet_hash
 			}
 		}
 	`
 
 	newTransfersQuery = `
-		query TransferListPage($page: String!, $limit: Int!, $network: String) {
+		query TransferListPage($page: String!, $limit: Int!, $network: [String!]) {
 			v2_transfers(args: {
 				p_limit: $limit,
 				p_sort_order: $page,
@@ -108,8 +106,6 @@ const (
 				base_token_symbol
 				base_token_decimals
 				sort_order
-				transfer_send_transaction_hash
-				transfer_recv_timestamp
 				packet_hash
 			}
 		}
@@ -159,8 +155,6 @@ type RawTransfer struct {
 	BaseTokenSymbol              string    `json:"base_token_symbol"`
 	BaseTokenDecimals            int       `json:"base_token_decimals"`
 	SortOrder                    string    `json:"sort_order"`
-	TransferSendTransactionHash  string    `json:"transfer_send_transaction_hash"`
-	TransferRecvTimestamp        *time.Time `json:"transfer_recv_timestamp"`
 	PacketHash                   string    `json:"packet_hash"`
 }
 
@@ -176,18 +170,17 @@ type RawChain struct {
 // Convert raw transfer to model
 func (r RawTransfer) ToModel() models.Transfer {
 	return models.Transfer{
-		TransferSendTxHash:    r.TransferSendTransactionHash,
+		PacketHash:            r.PacketHash,
 		SortOrder:             r.SortOrder,
 		TransferSendTimestamp: r.TransferSendTimestamp,
-		BaseAmount:            r.BaseAmount,
-		BaseTokenSymbol:       r.BaseTokenSymbol,
 		SenderCanonical:       r.SenderCanonical,
-		ReceiverCanonical:     r.ReceiverCanonical,
 		SenderDisplay:         r.SenderDisplay,
+		ReceiverCanonical:     r.ReceiverCanonical,
 		ReceiverDisplay:       r.ReceiverDisplay,
 		SourceChain:           r.SourceChain.ToModel(),
 		DestinationChain:      r.DestinationChain.ToModel(),
-		PacketHash:            r.PacketHash,
+		BaseAmount:            r.BaseAmount,
+		BaseTokenSymbol:       r.BaseTokenSymbol,
 	}
 }
 
@@ -204,19 +197,11 @@ func (r RawChain) ToModel() models.Chain {
 }
 
 // FetchLatestTransfers fetches the latest transfers for baseline
-func (c *Client) FetchLatestTransfers(ctx context.Context, limit int, networkFilter []string) ([]models.Transfer, error) {
+func (c *Client) FetchLatestTransfers(ctx context.Context, limit int, network []string) ([]models.Transfer, error) {
 	variables := map[string]interface{}{
-		"limit": limit,
+		"limit":   limit,
+		"network": network,
 	}
-	
-	// Convert network filter to single network parameter
-	var network *string
-	if len(networkFilter) > 0 {
-		network = &networkFilter[0]
-		variables["network"] = *network
-	}
-	
-	fmt.Printf("[GRAPHQL] Fetching latest transfers (limit: %d, network: %v)\n", limit, network)
 	
 	result, err := c.executeQuery(ctx, latestTransfersQuery, variables)
 	if err != nil {
@@ -229,25 +214,16 @@ func (c *Client) FetchLatestTransfers(ctx context.Context, limit int, networkFil
 		transfers[i] = raw.ToModel()
 	}
 	
-	fmt.Printf("[GRAPHQL] Fetched %d latest transfers\n", len(transfers))
 	return transfers, nil
 }
 
 // FetchNewTransfers fetches new transfers since the last sort order
-func (c *Client) FetchNewTransfers(ctx context.Context, lastSortOrder string, limit int, networkFilter []string) ([]models.Transfer, error) {
+func (c *Client) FetchNewTransfers(ctx context.Context, lastSortOrder string, limit int, network []string) ([]models.Transfer, error) {
 	variables := map[string]interface{}{
-		"page":  lastSortOrder,
-		"limit": limit,
+		"page":    lastSortOrder,
+		"limit":   limit,
+		"network": network,
 	}
-	
-	// Convert network filter to single network parameter
-	var network *string
-	if len(networkFilter) > 0 {
-		network = &networkFilter[0]
-		variables["network"] = *network
-	}
-	
-	fmt.Printf("[GRAPHQL] Fetching new transfers (page: %s, limit: %d, network: %v)\n", lastSortOrder, limit, network)
 	
 	result, err := c.executeQuery(ctx, newTransfersQuery, variables)
 	if err != nil {
@@ -260,14 +236,11 @@ func (c *Client) FetchNewTransfers(ctx context.Context, lastSortOrder string, li
 		transfers[i] = raw.ToModel()
 	}
 	
-	fmt.Printf("[GRAPHQL] Fetched %d new transfers\n", len(transfers))
 	return transfers, nil
 }
 
 // FetchChains fetches all available chains
 func (c *Client) FetchChains(ctx context.Context) ([]models.Chain, error) {
-	fmt.Printf("[GRAPHQL] Fetching chains\n")
-	
 	result, err := c.executeQuery(ctx, chainsQuery, nil)
 	if err != nil {
 		return nil, err
@@ -279,7 +252,6 @@ func (c *Client) FetchChains(ctx context.Context) ([]models.Chain, error) {
 		chains[i] = raw.ToModel()
 	}
 	
-	fmt.Printf("[GRAPHQL] Fetched %d chains\n", len(chains))
 	return chains, nil
 }
 
@@ -302,17 +274,14 @@ func (c *Client) executeQuery(ctx context.Context, query string, variables map[s
 	
 	req.Header.Set("Content-Type", "application/json")
 	
-	start := time.Now()
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 	
-	fmt.Printf("[GRAPHQL] Request completed in %v, status: %d\n", time.Since(start), resp.StatusCode)
-	
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("GraphQL request returned status %d", resp.StatusCode)
 	}
 	
 	var result GraphQLResponse

@@ -53,9 +53,9 @@ func DefaultConfig() Config {
 // DefaultFetcherConfig returns optimized fetcher configuration for real transfers
 func DefaultFetcherConfig() fetcher.Config {
 	return fetcher.Config{
-		PollInterval: 500 * time.Millisecond, // Fast polling for real-time transfers
+		PollInterval: 2 * time.Second,        // Slower polling for testing
 		BatchSize:    100,                    // Larger batches for better throughput
-		MockMode:     false,                  // Always use real data
+		MockMode:     false,                   // Use mock data for testing
 		GraphQLURL:   "https://staging.graphql.union.build/v1/graphql",
 	}
 } 
