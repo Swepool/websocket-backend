@@ -35,14 +35,12 @@ func main() {
 	
 	// Print broadcaster configuration
 	utils.LogInfo("MAIN", "Broadcaster configuration:")
-	utils.LogInfo("MAIN", "  Sharding enabled: %v", appConfig.Broadcaster.UseSharding)
-	if appConfig.Broadcaster.UseSharding {
-		utils.LogInfo("MAIN", "  Number of shards: %d", appConfig.Broadcaster.NumShards)
-		utils.LogInfo("MAIN", "  Workers per shard: %d", appConfig.Broadcaster.WorkersPerShard)
-		utils.LogInfo("MAIN", "  Max clients per shard: %d", appConfig.Broadcaster.MaxClients)
-		utils.LogInfo("MAIN", "  Total capacity: %d clients", 
-			appConfig.Broadcaster.NumShards*appConfig.Broadcaster.MaxClients)
-	}
+	utils.LogInfo("MAIN", "  Sharding enabled: always")
+	utils.LogInfo("MAIN", "  Number of shards: %d", appConfig.Broadcaster.NumShards)
+	utils.LogInfo("MAIN", "  Workers per shard: %d", appConfig.Broadcaster.WorkersPerShard)
+	utils.LogInfo("MAIN", "  Max clients per shard: %d", appConfig.Broadcaster.MaxClients)
+	utils.LogInfo("MAIN", "  Total capacity: %d clients", 
+		appConfig.Broadcaster.NumShards*appConfig.Broadcaster.MaxClients)
 	
 	// Create chains service first
 	chainsService := chains.NewService(appConfig.Chains)

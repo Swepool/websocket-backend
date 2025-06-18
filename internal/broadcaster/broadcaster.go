@@ -2,78 +2,103 @@ package broadcaster
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 	"websocket-backend-new/internal/channels"
 	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 	"websocket-backend-new/internal/stats"
 	"github.com/gorilla/websocket"
-	"sync/atomic"
 )
 
-// Config holds broadcaster configuration
+// Config holds configuration for the broadcaster
 type Config struct {
-	MaxClients      int  `json:"maxClients"`      // Maximum clients (default: 1000)
-	BufferSize      int  `json:"bufferSize"`      // Buffer size per client (default: 100)
-	DropSlowClients bool `json:"dropSlowClients"` // Drop slow clients (default: true)
-	UseSharding     bool `json:"useSharding"`     // Enable sharded broadcaster (default: false)
+	MaxClients      int  `json:"maxClients"`      // Maximum clients per shard (default: 1000)
+	BufferSize      int  `json:"bufferSize"`      // Buffer size for each client (default: 100)
+	DropSlowClients bool `json:"dropSlowClients"` // Whether to drop slow clients (default: true)
 	NumShards       int  `json:"numShards"`       // Number of shards (default: 4)
-	WorkersPerShard int  `json:"workersPerShard"` // Workers per shard (default: 4)
+	WorkersPerShard int  `json:"workersPerShard"` // Number of workers per shard (default: 4)
 }
 
-// DefaultConfig returns default broadcaster configuration
+// DefaultConfig returns the default broadcaster configuration
 func DefaultConfig() Config {
 	return Config{
 		MaxClients:      1000,
 		BufferSize:      100,
 		DropSlowClients: true,
-		UseSharding:     false, // Default to original implementation
 		NumShards:       4,
 		WorkersPerShard: 4,
 	}
 }
 
-// Client represents a WebSocket client with enhanced connection management
+// Client represents a WebSocket client with shard information and enhanced management
 type Client struct {
-	id           string
-	conn         *websocket.Conn
-	send         chan []byte
-	lastPong     time.Time
-	isClosing    bool
-	closeMu      sync.Mutex
+	id       string
+	conn     *websocket.Conn
+	send     chan []byte
+	shardID  int
+	lastPong time.Time
+	isClosing bool
+	closeMu   sync.Mutex
 }
 
-// StatsCollector interface for getting chart data
-type StatsCollector interface {
-	GetChartDataForFrontend() interface{}
-}
-
-// Broadcaster manages WebSocket clients and broadcasts data with improved reliability
-type Broadcaster struct {
+// Shard represents a shard of clients with its own worker pool and enhanced management
+type Shard struct {
+	id              int
 	clients         map[*Client]bool
 	register        chan *Client
 	unregister      chan *Client
+	broadcast       chan []byte
 	mu              sync.RWMutex
-	upgrader        websocket.Upgrader
 	config          Config
-	channels        *channels.Channels
-	statsCollector  *stats.Collector
+	workerPool      chan chan []byte
+	workers         []*ShardWorker
+	ctx             context.Context
+	cancel          context.CancelFunc
+	clientCount     int64
 	healthTicker    *time.Ticker
 	shutdownOnce    sync.Once
-	chartFetching   int32  // atomic flag to prevent concurrent chart fetches
+	// Callback for when new clients connect
+	onClientConnect func(*Client)
 }
 
-// NewBroadcaster creates a new broadcaster with enhanced client management
+// ShardWorker represents a worker that handles broadcasts for a shard with improved efficiency
+type ShardWorker struct {
+	id         int
+	shardID    int
+	work       chan []byte
+	workerPool chan chan []byte
+	quit       chan bool
+	shard      *Shard
+	isActive   int32 // atomic flag for worker state
+}
+
+// Broadcaster manages WebSocket connections using a sharded approach
+type Broadcaster struct {
+	config         Config
+	channels       *channels.Channels
+	statsCollector *stats.Collector
+	shards         []*Shard
+	upgrader       websocket.Upgrader
+	totalClients   int64
+	mu             sync.RWMutex
+	shutdownOnce   sync.Once
+	chartFetching  int32 // atomic flag to prevent concurrent chart fetches
+}
+
+// NewBroadcaster creates a new sharded broadcaster
 func NewBroadcaster(config Config, channels *channels.Channels, statsCollector *stats.Collector) *Broadcaster {
-	return &Broadcaster{
-		clients:    make(map[*Client]bool),
-		register:   make(chan *Client, 100), // Buffered to prevent blocking
-		unregister: make(chan *Client, 100), // Buffered for better cleanup
-		config:     config,
-		channels:   channels,
+	sb := &Broadcaster{
+		config:         config,
+		channels:       channels,
 		statsCollector: statsCollector,
+		shards:         make([]*Shard, config.NumShards),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow connections from any origin
@@ -82,109 +107,508 @@ func NewBroadcaster(config Config, channels *channels.Channels, statsCollector *
 			HandshakeTimeout: 45 * time.Second,
 		},
 	}
+
+	// Initialize shards with enhanced settings
+	for i := 0; i < config.NumShards; i++ {
+		sb.shards[i] = newShard(i, config)
+		// Set callback for new client connections
+		sb.shards[i].onClientConnect = sb.sendInitialChartData
+	}
+
+	return sb
 }
 
-// Start begins the broadcaster's main loop with optimized performance
-func (b *Broadcaster) Start(ctx context.Context) {
-	utils.LogInfo("BROADCASTER", "Starting optimized broadcaster with enhanced client management")
+// newShard creates a new shard with worker pool and enhanced management
+func newShard(id int, config Config) *Shard {
+	ctx, cancel := context.WithCancel(context.Background())
 	
-	// Create tickers for periodic updates and health checks
-	chartTicker := time.NewTicker(5 * time.Second)
-	b.healthTicker = time.NewTicker(30 * time.Second)
-	
-	// Add a debug ticker to monitor main loop health
-	debugTicker := time.NewTicker(60 * time.Second)
-	lastTransferTime := time.Now()
+	shard := &Shard{
+		id:         id,
+		clients:    make(map[*Client]bool),
+		register:   make(chan *Client, 200), // Larger buffer for better throughput
+		unregister: make(chan *Client, 200), // Larger buffer for cleanup bursts
+		broadcast:  make(chan []byte, 2000), // Larger buffer for high load
+		config:     config,
+		workerPool: make(chan chan []byte, config.WorkersPerShard),
+		workers:    make([]*ShardWorker, config.WorkersPerShard),
+		ctx:        ctx,
+		cancel:     cancel,
+		healthTicker: time.NewTicker(45 * time.Second), // Health check every 45 seconds
+	}
+
+	// Initialize workers for this shard with better settings
+	for i := 0; i < config.WorkersPerShard; i++ {
+		worker := &ShardWorker{
+			id:         i,
+			shardID:    id,
+			work:       make(chan []byte, 200), // Larger worker buffer
+			workerPool: shard.workerPool,
+			quit:       make(chan bool, 1), // Buffered for non-blocking shutdown
+			shard:      shard,
+			isActive:   1,
+		}
+		shard.workers[i] = worker
+	}
+
+	return shard
+}
+
+// Start begins all shards and their worker pools with enhanced error handling
+func (sb *Broadcaster) Start(ctx context.Context) {
+	utils.LogInfo("SHARDED_BROADCASTER", "Starting with %d shards, %d workers per shard", 
+		sb.config.NumShards, sb.config.WorkersPerShard)
+
+	// Start all shards
+	for i, shard := range sb.shards {
+		go shard.start()
+		utils.LogInfo("SHARDED_BROADCASTER", "Started shard %d with %d workers", i, sb.config.WorkersPerShard)
+	}
+
+	// Create a ticker for periodic chart updates
+	chartTicker := time.NewTicker(15 * time.Second)
 	
 	defer func() {
 		chartTicker.Stop()
-		b.healthTicker.Stop()
-		debugTicker.Stop()
-		b.cleanup()
+		sb.shutdown()
 	}()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
-			utils.LogInfo("BROADCASTER", "Context cancelled, shutting down")
+			utils.LogInfo("SHARDED_BROADCASTER", "Context cancelled, shutting down")
 			return
-			
-		case client := <-b.register:
-			b.handleClientRegistration(client)
-			
-		case client := <-b.unregister:
-			b.handleClientUnregistration(client)
-			
-		case transfer := <-b.channels.TransferBroadcasts:
-			lastTransferTime = time.Now()
-			b.broadcastTransfer(transfer)
-			
-		case chartData := <-b.channels.ChartUpdates:
-			b.broadcastChartData(chartData)
-			
+
+		case transfer := <-sb.channels.TransferBroadcasts:
+			sb.broadcastTransfer(transfer)
+
+		case chartData := <-sb.channels.ChartUpdates:
+			sb.broadcastChartData(chartData)
+
 		case <-chartTicker.C:
-			b.sendPeriodicChartUpdate()
-			
-		case <-b.healthTicker.C:
-			b.performHealthCheck()
-			
-		case <-debugTicker.C:
-			// Debug: Log broadcaster health with batched logging
-			b.mu.RLock()
-			clientCount := len(b.clients)
-			b.mu.RUnlock()
-			
-			timeSinceLastTransfer := time.Since(lastTransferTime)
-			utils.LogDebug("BROADCASTER", "Debug - Clients: %d, Last transfer: %v ago, Main loop healthy", 
-				clientCount, timeSinceLastTransfer)
+			sb.sendPeriodicChartUpdate()
 		}
 	}
 }
 
-// handleClientRegistration handles new client registration with proper limits and initialization
-func (b *Broadcaster) handleClientRegistration(client *Client) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// start begins a shard's main loop and worker pool with enhanced management
+func (s *Shard) start() {
+	utils.LogInfo("SHARDED_BROADCASTER", "Shard %d starting with enhanced management", s.id)
 	
-	// Check client limits
-	if len(b.clients) >= b.config.MaxClients {
-		utils.LogWarn("BROADCASTER", "Max clients reached (%d), rejecting new client %s", b.config.MaxClients, client.id)
+	// Start all workers
+	for _, worker := range s.workers {
+		go worker.start()
+	}
+
+	// Start health monitoring
+	go s.healthMonitor()
+
+	defer func() {
+		s.shutdownOnce.Do(func() {
+			utils.LogInfo("SHARDED_BROADCASTER", "Shard %d shutting down", s.id)
+			s.healthTicker.Stop()
+			
+			// Shutdown workers
+			for _, worker := range s.workers {
+				worker.stop()
+			}
+			
+			// Close all clients
+			s.mu.Lock()
+			for client := range s.clients {
+				client.safeClose()
+			}
+			s.clients = make(map[*Client]bool)
+			s.mu.Unlock()
+		})
+	}()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+
+		case client := <-s.register:
+			s.handleClientRegistration(client)
+
+		case client := <-s.unregister:
+			s.handleClientUnregistration(client)
+
+		case data := <-s.broadcast:
+			s.dispatchToWorkers(data)
+		}
+	}
+}
+
+// healthMonitor performs periodic health checks on shard clients
+func (s *Shard) healthMonitor() {
+	defer s.healthTicker.Stop()
+	
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.healthTicker.C:
+			s.performHealthCheck()
+		}
+	}
+}
+
+// performHealthCheck checks client health and removes stale connections
+func (s *Shard) performHealthCheck() {
+	s.mu.RLock()
+	clients := make([]*Client, 0, len(s.clients))
+	for client := range s.clients {
+		clients = append(clients, client)
+	}
+	s.mu.RUnlock()
+	
+	now := time.Now()
+	staleClients := 0
+	
+	for _, client := range clients {
+		// Check if client hasn't responded to pings for too long (2 minutes)
+		if now.Sub(client.lastPong) > 2*time.Minute {
+					utils.LogInfo("SHARDED_BROADCASTER", "Shard %d client %s appears stale (last pong: %v ago), removing", 
+			s.id, client.id, now.Sub(client.lastPong))
+			
+			// Non-blocking unregister
+			select {
+			case s.unregister <- client:
+			default:
+				// If channel is full, force close the client
+				client.safeClose()
+			}
+			staleClients++
+		}
+	}
+	
+	if staleClients > 0 {
+		utils.LogInfo("SHARDED_BROADCASTER", "Shard %d health check removed %d stale clients", s.id, staleClients)
+	}
+}
+
+// start begins a worker's processing loop with improved efficiency
+func (w *ShardWorker) start() {
+	atomic.StoreInt32(&w.isActive, 1)
+	
+	defer func() {
+		atomic.StoreInt32(&w.isActive, 0)
+		if r := recover(); r != nil {
+			utils.LogError("SHARDED_BROADCASTER", "Worker %d-%d panic recovered: %v", w.shardID, w.id, r)
+		}
+	}()
+	
+	for {
+		// Make worker available in pool
+		select {
+		case w.workerPool <- w.work:
+		case <-w.quit:
+			return
+		}
+
+		select {
+		case data := <-w.work:
+			w.handleBroadcast(data)
+		case <-w.quit:
+			return
+		}
+	}
+}
+
+// stop stops a worker gracefully
+func (w *ShardWorker) stop() {
+	if atomic.LoadInt32(&w.isActive) == 1 {
+		select {
+		case w.quit <- true:
+		default:
+		}
+	}
+}
+
+// handleBroadcast processes a broadcast for this worker's clients with improved efficiency
+func (w *ShardWorker) handleBroadcast(data []byte) {
+	w.shard.mu.RLock()
+	clients := make([]*Client, 0, len(w.shard.clients))
+	for client := range w.shard.clients {
+		clients = append(clients, client)
+	}
+	w.shard.mu.RUnlock()
+
+	if len(clients) == 0 {
+		return
+	}
+
+	// Distribute work across workers by client hash for better load balancing
+	workersCount := len(w.shard.workers)
+	successCount := 0
+	failedCount := 0
+	
+	for _, client := range clients {
+		// Check if this worker should handle this client
+		clientWorkerID := int(hash(client.id)) % workersCount
+		if clientWorkerID != w.id {
+			continue
+		}
+
+		// Skip closing clients
+		if client.isClosing {
+			continue
+		}
+
+		select {
+		case client.send <- data:
+			successCount++
+		default:
+			// Client's send channel is full
+			failedCount++
+			if w.shard.config.DropSlowClients {
+				// Non-blocking unregister
+				select {
+				case w.shard.unregister <- client:
+				default:
+					// If unregister channel is full, force close
+					client.safeClose()
+				}
+			}
+		}
+	}
+
+	if successCount > 0 || failedCount > 0 {
+		utils.LogDebug("SHARDED_BROADCASTER", "Worker %d-%d sent data to %d clients, failed %d", 
+			w.shardID, w.id, successCount, failedCount)
+	}
+}
+
+// dispatchToWorkers sends broadcast data to available workers with improved fallback
+func (s *Shard) dispatchToWorkers(data []byte) {
+	clientCount := atomic.LoadInt64(&s.clientCount)
+	if clientCount == 0 {
+		return
+	}
+
+	// Try to dispatch to available worker with timeout
+	select {
+	case work := <-s.workerPool:
+		select {
+		case work <- data:
+			// Successfully dispatched to worker
+		case <-time.After(10 * time.Millisecond):
+			// Worker is slow, return to pool and use fallback
+			go func() { 
+				select {
+				case s.workerPool <- work:
+				default:
+				}
+			}()
+			s.directBroadcast(data)
+		}
+	case <-time.After(5 * time.Millisecond):
+		// No workers available quickly, use direct broadcast
+		s.directBroadcast(data)
+	}
+}
+
+// directBroadcast sends data directly to all clients in shard (fallback) with improved handling
+func (s *Shard) directBroadcast(data []byte) {
+	s.mu.RLock()
+	clients := make([]*Client, 0, len(s.clients))
+	for client := range s.clients {
+		clients = append(clients, client)
+	}
+	s.mu.RUnlock()
+
+	successCount := 0
+	failedCount := 0
+	
+	for _, client := range clients {
+		if client.isClosing {
+			continue
+		}
+		
+		select {
+		case client.send <- data:
+			successCount++
+		default:
+			failedCount++
+			if s.config.DropSlowClients {
+				// Non-blocking unregister
+				select {
+				case s.unregister <- client:
+				default:
+					client.safeClose()
+				}
+			}
+		}
+	}
+
+	if successCount > 0 || failedCount > 0 {
+		utils.LogDebug("SHARDED_BROADCASTER", "Shard %d direct broadcast to %d clients, failed %d", 
+			s.id, successCount, failedCount)
+	}
+}
+
+// handleClientRegistration handles new client registration in shard with enhanced management
+func (s *Shard) handleClientRegistration(client *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check client limits for this shard
+	if len(s.clients) >= s.config.MaxClients {
+		utils.LogWarn("SHARDED_BROADCASTER", "Shard %d max clients reached (%d), rejecting client %s", 
+			s.id, s.config.MaxClients, client.id)
 		client.safeClose()
 		return
 	}
-	
-	b.clients[client] = true
+
+	s.clients[client] = true
+	atomic.AddInt64(&s.clientCount, 1)
 	client.lastPong = time.Now()
-	
-	utils.LogInfo("BROADCASTER", "Client %s registered, total clients: %d", client.id, len(b.clients))
-	
+
+	utils.LogInfo("SHARDED_BROADCASTER", "Shard %d client %s registered, total: %d", s.id, client.id, len(s.clients))
+
 	// Start client's goroutines
-	go client.writePump(b.unregister)
-	go client.readPump(b.unregister)
+	go client.writePump(s.unregister)
+	go client.readPump(s.unregister)
 	
-	// Send initial chart data to new client
-	b.sendInitialDataToClient(client)
+	// Call callback for new client connection (send initial chart data)
+	if s.onClientConnect != nil {
+		go s.onClientConnect(client)
+	}
 }
 
-// sendInitialDataToClient sends welcome data to newly connected client with optimized performance
-func (b *Broadcaster) sendInitialDataToClient(client *Client) {
+// handleClientUnregistration handles client disconnection in shard with proper cleanup
+func (s *Shard) handleClientUnregistration(client *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.clients[client]; ok {
+		delete(s.clients, client)
+		client.safeClose()
+		atomic.AddInt64(&s.clientCount, -1)
+			utils.LogInfo("SHARDED_BROADCASTER", "Shard %d client %s unregistered, remaining: %d", 
+		s.id, client.id, len(s.clients))
+	}
+}
+
+// getShardForClient determines which shard a client should belong to
+func (sb *Broadcaster) getShardForClient(clientID string) int {
+	return int(hash(clientID)) % sb.config.NumShards
+}
+
+// hash function for consistent client distribution
+func hash(s string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return h.Sum32()
+}
+
+// broadcastTransfer broadcasts a single transfer to all shards with optimized performance
+func (sb *Broadcaster) broadcastTransfer(transfer models.Transfer) {
+	// Use optimized marshaling with built-in pooling
+	data, err := utils.DefaultMarshalTransfer(transfer)
+	if err != nil {
+		utils.LogError("SHARDED_BROADCASTER", "Failed to marshal transfer %s: %v", transfer.PacketHash, err)
+		return
+	}
+
+	totalClients := sb.GetClientCount()
+	
+	// Always log when we receive a transfer, even if no clients
+	if totalClients == 0 {
+		utils.LogDebug("SHARDED_BROADCASTER", "Received transfer %s but no clients connected, skipping broadcast", transfer.PacketHash)
+		return
+	}
+	
+	utils.LogInfo("SHARDED_BROADCASTER", "Broadcasting transfer %s to %d shards (%d total clients)", 
+		transfer.PacketHash, len(sb.shards), totalClients)
+
+	// Broadcast to all shards with improved error handling
+	successfulShards := 0
+	for _, shard := range sb.shards {
+		select {
+		case shard.broadcast <- data:
+			successfulShards++
+		default:
+			utils.LogWarn("SHARDED_BROADCASTER", "Shard %d broadcast channel full", shard.id)
+		}
+	}
+
+	if successfulShards > 0 {
+		utils.LogInfo("SHARDED_BROADCASTER", "Successfully sent transfer %s to %d/%d shards", 
+			transfer.PacketHash, successfulShards, len(sb.shards))
+	}
+}
+
+// broadcastChartData broadcasts chart data to all shards with improved error handling
+func (sb *Broadcaster) broadcastChartData(rawData interface{}) {
+	if rawData == nil {
+		utils.LogWarn("SHARDED_BROADCASTER", "Attempted to broadcast nil chart data")
+		return
+	}
+	
+	data, err := utils.DefaultMarshalChart(rawData)
+	if err != nil {
+		utils.LogError("SHARDED_BROADCASTER", "Failed to marshal chart data: %v", err)
+		return
+	}
+
+	totalClients := sb.GetClientCount()
+	if totalClients == 0 {
+		utils.LogDebug("SHARDED_BROADCASTER", "No clients connected for chart data broadcast")
+		return
+	}
+	
+	utils.LogInfo("SHARDED_BROADCASTER", "Broadcasting chart data to %d shards (%d total clients, size: %d bytes)", 
+		len(sb.shards), totalClients, len(data))
+
+	successfulShards := 0
+	for _, shard := range sb.shards {
+		select {
+		case shard.broadcast <- data:
+			successfulShards++
+		default:
+			utils.LogWarn("SHARDED_BROADCASTER", "Shard %d chart broadcast channel full", shard.id)
+		}
+	}
+	
+	if successfulShards > 0 {
+		utils.LogInfo("SHARDED_BROADCASTER", "Successfully sent chart data to %d/%d shards", 
+			successfulShards, len(sb.shards))
+	} else {
+		utils.LogWarn("SHARDED_BROADCASTER", "Failed to send chart data to any shards")
+	}
+}
+
+// sendPeriodicChartUpdate sends periodic chart updates ONLY when meaningful data exists
+func (sb *Broadcaster) sendPeriodicChartUpdate() {
+	// Always fetch chart data to keep stats fresh, even with no clients
+	// Check if we're already fetching chart data to prevent concurrent fetches
+	if !atomic.CompareAndSwapInt32(&sb.chartFetching, 0, 1) {
+		utils.LogDebug("SHARDED_BROADCASTER", "Chart data fetch already in progress, skipping")
+		return
+	}
+	
 	// Run chart data fetching in a separate goroutine to avoid blocking the main loop
 	go func() {
 		defer func() {
+			atomic.StoreInt32(&sb.chartFetching, 0) // Reset the flag
 			if r := recover(); r != nil {
-				utils.LogError("BROADCASTER", "Panic in sendInitialDataToClient for client %s: %v", client.id, r)
+				utils.LogError("SHARDED_BROADCASTER", "Panic in sendPeriodicChartUpdate: %v", r)
 			}
 		}()
+		
+		clientCount := sb.GetClientCount()
+		utils.LogDebug("SHARDED_BROADCASTER", "Fetching periodic chart data for %d clients", clientCount)
 		
 		// Fetch chart data with timeout
 		chartDataChan := make(chan interface{}, 1)
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					utils.LogError("BROADCASTER", "Panic in chart data fetch for client %s: %v", client.id, r)
+					utils.LogError("SHARDED_BROADCASTER", "Panic in periodic chart data fetch: %v", r)
 				}
 			}()
-			chartData := b.statsCollector.GetChartDataForFrontend()
+			chartData := sb.statsCollector.GetChartDataForFrontend()
 			select {
 			case chartDataChan <- chartData:
 			default:
@@ -194,361 +618,109 @@ func (b *Broadcaster) sendInitialDataToClient(client *Client) {
 		var chartData interface{}
 		select {
 		case chartData = <-chartDataChan:
-		case <-time.After(2 * time.Second):
-			utils.LogWarn("BROADCASTER", "Timeout fetching chart data for client %s", client.id)
-			return
-		}
-		
-		// Use optimized JSON marshaling
-		data, err := utils.DefaultMarshalChart(chartData)
-		if err != nil {
-			utils.LogError("BROADCASTER", "Failed to marshal initial chart data for client %s: %v", client.id, err)
-			return
-		}
-		
-		// Use optimized backpressure-protected send
-		config := utils.DefaultBackpressureConfig()
-		config.TimeoutMs = 100
-		config.DropOnOverflow = true
-		
-		success := utils.SendWithBackpressure(client.send, data, config, nil)
-		if success {
-			utils.LogDebug("BROADCASTER", "Sent initial chart data to client %s", client.id)
-		} else {
-			utils.LogWarn("BROADCASTER", "Failed to send initial data to slow client %s, will unregister", client.id)
-			// Non-blocking unregister
-			select {
-			case b.unregister <- client:
-			default:
-				// If unregister channel is full, force close
-				client.safeClose()
+			if clientCount > 0 {
+				utils.LogDebug("SHARDED_BROADCASTER", "Broadcasting chart data to all clients")
+				sb.broadcastChartData(chartData)
+			} else {
+				utils.LogDebug("SHARDED_BROADCASTER", "Chart data refreshed but no clients connected")
 			}
+		case <-time.After(3 * time.Second):
+			utils.LogWarn("SHARDED_BROADCASTER", "Timeout fetching periodic chart data")
 		}
 	}()
 }
 
-// handleClientUnregistration handles client disconnection with proper cleanup
-func (b *Broadcaster) handleClientUnregistration(client *Client) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	
-	if _, exists := b.clients[client]; exists {
-		delete(b.clients, client)
-		client.safeClose()
-		utils.LogInfo("BROADCASTER", "Client %s unregistered, remaining clients: %d", client.id, len(b.clients))
-	}
-}
-
-// getClientSnapshot creates a snapshot of clients with minimal lock time (2.2 optimization)
-func (b *Broadcaster) getClientSnapshot() []*Client {
-	b.mu.RLock()
-	clients := make([]*Client, 0, len(b.clients))
-	for client := range b.clients {
-		clients = append(clients, client)
-	}
-	b.mu.RUnlock()
-	return clients
-}
-
-// buildTransferData creates the transfer data structure without holding locks
-func (b *Broadcaster) buildTransferData(transfer models.Transfer) map[string]interface{} {
-	return map[string]interface{}{
-		"source_chain": map[string]interface{}{
-			"universal_chain_id": transfer.SourceChain.UniversalChainID,
-			"display_name":       transfer.SourceChain.DisplayName,
-			"chain_id":           transfer.SourceChain.ChainID,
-			"testnet":            transfer.SourceChain.Testnet,
-			"rpc_type":           transfer.SourceChain.RpcType,
-			"addr_prefix":        transfer.SourceChain.AddrPrefix,
-		},
-		"destination_chain": map[string]interface{}{
-			"universal_chain_id": transfer.DestinationChain.UniversalChainID,
-			"display_name":       transfer.DestinationChain.DisplayName,
-			"chain_id":           transfer.DestinationChain.ChainID,
-			"testnet":            transfer.DestinationChain.Testnet,
-			"rpc_type":           transfer.DestinationChain.RpcType,
-			"addr_prefix":        transfer.DestinationChain.AddrPrefix,
-		},
-		"packet_hash":            transfer.PacketHash,
-		"isTestnetTransfer":      transfer.IsTestnetTransfer,
-		"sourceDisplayName":      transfer.SourceDisplayName,
-		"destinationDisplayName": transfer.DestinationDisplayName,
-		"formattedTimestamp":     transfer.FormattedTimestamp,
-		"routeKey":               transfer.RouteKey,
-		"senderDisplay":          transfer.SenderDisplay,
-		"receiverDisplay":        transfer.ReceiverDisplay,
-	}
-}
-
-// broadcastTransfer broadcasts a single transfer to all connected clients with optimized performance
-func (b *Broadcaster) broadcastTransfer(transfer models.Transfer) {
-	// Marshal using optimized JSON functions (includes pooling and pre-marshaled content)
-	data, err := utils.DefaultMarshalTransfer(transfer)
+// UpgradeConnection upgrades HTTP connection to WebSocket and assigns to appropriate shard with enhanced settings
+func (sb *Broadcaster) UpgradeConnection(w http.ResponseWriter, r *http.Request) {
+	conn, err := sb.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		utils.LogError("BROADCASTER", "Failed to marshal transfer %s: %v", transfer.PacketHash, err)
+		utils.LogError("SHARDED_BROADCASTER", "Failed to upgrade connection: %v", err)
 		return
 	}
-	
-	// Get client snapshot with minimal lock time
-	clients := b.getClientSnapshot()
-	clientCount := len(clients)
-	
-	// Always log when we receive a transfer, even if no clients
-	if clientCount == 0 {
-		utils.LogDebug("BROADCASTER", "Received transfer %s but no clients connected, skipping broadcast", transfer.PacketHash)
-		return
-	}
-	
-	utils.LogInfo("BROADCASTER", "Broadcasting transfer %s to %d clients", transfer.PacketHash, clientCount)
-	
-	// Send to all clients with backpressure protection
-	successCount := 0
-	for _, client := range clients {
-		if b.sendToClientOptimized(client, data) {
-			successCount++
-		}
-	}
-	
-	if successCount > 0 {
-		utils.LogInfo("BROADCASTER", "Successfully sent transfer %s to %d/%d clients", transfer.PacketHash, successCount, clientCount)
-	}
-}
 
-// sendToClientOptimized sends data to a client with backpressure protection
-func (b *Broadcaster) sendToClientOptimized(client *Client, data []byte) bool {
-	if client.isClosing {
-		return false
-	}
-	
-	// Use optimized backpressure protection
-	config := utils.DefaultBackpressureConfig()
-	config.DropOnOverflow = b.config.DropSlowClients
-	config.TimeoutMs = 50 // Quick timeout for client sends
-	
-	success := utils.SendWithBackpressure(client.send, data, config, nil)
-	
-	// If failed and we drop slow clients, schedule disconnect
-	if !success && b.config.DropSlowClients {
-		utils.LogDebug("BROADCASTER", "Client %s send buffer full, scheduling disconnect", client.id)
-		go func() { 
-			select {
-			case b.unregister <- client:
-			default:
-				// If unregister channel is full, force close
-				client.safeClose()
-			}
-		}()
-	}
-	
-	return success
-}
-
-// sendToClient is kept for backward compatibility but uses optimized version
-func (b *Broadcaster) sendToClient(client *Client, data []byte) bool {
-	return b.sendToClientOptimized(client, data)
-}
-
-// broadcastChartData broadcasts chart data to all connected clients with optimized performance
-func (b *Broadcaster) broadcastChartData(rawData interface{}) {
-	if rawData == nil {
-		utils.LogWarn("BROADCASTER", "Attempted to broadcast nil chart data")
-		return
-	}
-	
-	// Marshal using optimized JSON functions
-	data, err := utils.DefaultMarshalChart(rawData)
-	if err != nil {
-		utils.LogError("BROADCASTER", "Failed to marshal chart data: %v", err)
-		return
-	}
-	
-	// Get client snapshot with minimal lock time
-	clients := b.getClientSnapshot()
-	clientCount := len(clients)
-	
-	if clientCount == 0 {
-		utils.LogDebug("BROADCASTER", "No clients connected for chart data broadcast")
-		return
-	}
-	
-	utils.LogInfo("BROADCASTER", "Broadcasting chart data to %d clients (size: %d bytes)", clientCount, len(data))
-	
-	// Send to all clients with backpressure protection
-	successCount := 0
-	for _, client := range clients {
-		if b.sendToClientOptimized(client, data) {
-			successCount++
-		}
-	}
-	
-	if successCount > 0 {
-		utils.LogInfo("BROADCASTER", "Successfully sent chart data to %d/%d clients", successCount, clientCount)
-	} else {
-		utils.LogWarn("BROADCASTER", "Failed to send chart data to any clients")
-	}
-}
-
-// sendPeriodicChartUpdate sends periodic chart updates ONLY when meaningful data exists
-func (b *Broadcaster) sendPeriodicChartUpdate() {
-	b.mu.RLock()
-	clientCount := len(b.clients)
-	b.mu.RUnlock()
-	
-	if clientCount > 0 {
-		// Check if we're already fetching chart data to prevent concurrent fetches
-		if !atomic.CompareAndSwapInt32(&b.chartFetching, 0, 1) {
-			utils.LogDebug("BROADCASTER", "Chart data fetch already in progress, skipping")
-			return
-		}
-		
-		// Run chart data fetching in a separate goroutine to avoid blocking the main loop
-		go func() {
-			defer func() {
-				atomic.StoreInt32(&b.chartFetching, 0) // Reset the flag
-				if r := recover(); r != nil {
-					utils.LogError("BROADCASTER", "Panic in sendPeriodicChartUpdate: %v", r)
-				}
-			}()
-			
-			utils.LogDebug("BROADCASTER", "Fetching periodic chart data for %d clients", clientCount)
-			
-			// Fetch chart data with timeout
-			chartDataChan := make(chan interface{}, 1)
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						utils.LogError("BROADCASTER", "Panic in periodic chart data fetch: %v", r)
-					}
-				}()
-				chartData := b.statsCollector.GetChartDataForFrontend()
-				select {
-				case chartDataChan <- chartData:
-				default:
-				}
-			}()
-			
-			var chartData interface{}
-			select {
-			case chartData = <-chartDataChan:
-				utils.LogDebug("BROADCASTER", "Broadcasting chart data to all clients")
-				b.broadcastChartData(chartData)
-			case <-time.After(3 * time.Second):
-				utils.LogWarn("BROADCASTER", "Timeout fetching periodic chart data")
-			}
-		}()
-	}
-}
-
-
-
-// performHealthCheck checks client health and removes stale connections
-func (b *Broadcaster) performHealthCheck() {
-	b.mu.RLock()
-	clients := make([]*Client, 0, len(b.clients))
-	for client := range b.clients {
-		clients = append(clients, client)
-	}
-	b.mu.RUnlock()
-	
-	now := time.Now()
-	staleClients := 0
-	
-	for _, client := range clients {
-		// Check if client hasn't responded to pings for too long (2 minutes)
-		if now.Sub(client.lastPong) > 2*time.Minute {
-			utils.LogInfo("BROADCASTER", "Client %s appears stale (last pong: %v ago), removing", 
-				client.id, now.Sub(client.lastPong))
-			go func(c *Client) { b.unregister <- c }(client)
-			staleClients++
-		}
-	}
-	
-	if staleClients > 0 {
-		utils.LogInfo("BROADCASTER", "Health check removed %d stale clients", staleClients)
-	}
-}
-
-// UpgradeConnection upgrades HTTP connection to WebSocket with optimized settings
-func (b *Broadcaster) UpgradeConnection(w http.ResponseWriter, r *http.Request) {
-	conn, err := b.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		utils.LogError("BROADCASTER", "Failed to upgrade connection: %v", err)
-		return
-	}
-	
 	// Configure connection settings
 	conn.SetReadLimit(512)
-	
-	// Use optimized buffer size from configuration or defaults
-	bufferSize := utils.DefaultGetChannelBufferSize("ClientSend", b.config.BufferSize)
-	
+
+	clientID := generateClientID()
+	shardID := sb.getShardForClient(clientID)
+
 	client := &Client{
-		id:       generateClientID(),
-		conn:     conn,
-		send:     make(chan []byte, bufferSize),
-		lastPong: time.Now(),
+		id:        clientID,
+		conn:      conn,
+		send:      make(chan []byte, sb.config.BufferSize),
+		shardID:   shardID,
+		lastPong:  time.Now(),
 		isClosing: false,
 	}
-	
-	utils.LogInfo("BROADCASTER", "New WebSocket connection from %s, assigned ID: %s", 
-		r.RemoteAddr, client.id)
-	
-	// Register client with backpressure protection
-	config := utils.DefaultBackpressureConfig()
-	config.TimeoutMs = 100
-	config.DropOnOverflow = true
-	
-	success := utils.SendWithBackpressure(b.register, client, config, nil)
-	if !success {
-		utils.LogWarn("BROADCASTER", "Failed to register client %s (register channel full)", client.id)
+
+	utils.LogInfo("SHARDED_BROADCASTER", "New connection from %s, client %s assigned to shard %d", 
+		r.RemoteAddr, clientID, shardID)
+
+	// Register client with appropriate shard (non-blocking)
+	shard := sb.shards[shardID]
+	select {
+	case shard.register <- client:
+		atomic.AddInt64(&sb.totalClients, 1)
+	case <-time.After(100 * time.Millisecond):
+			utils.LogWarn("SHARDED_BROADCASTER", "Failed to register client %s (shard %d register channel full)", 
+		clientID, shardID)
 		client.safeClose()
 	}
 }
 
-// GetClientCount returns the current number of connected clients
-func (b *Broadcaster) GetClientCount() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.clients)
+// GetClientCount returns the total number of connected clients across all shards
+func (sb *Broadcaster) GetClientCount() int {
+	total := int64(0)
+	for _, shard := range sb.shards {
+		total += atomic.LoadInt64(&shard.clientCount)
+	}
+	return int(total)
 }
 
 // GetType returns the type of broadcaster
-func (b *Broadcaster) GetType() string {
-	return "standard"
+func (sb *Broadcaster) GetType() string {
+	return "sharded"
 }
 
-// GetShardStats returns shard statistics (empty for standard broadcaster)
-func (b *Broadcaster) GetShardStats() map[string]interface{} {
-	return map[string]interface{}{
-		"sharding_enabled": false,
-		"type": "standard",
-		"total_clients": b.GetClientCount(),
-	}
-}
-
-// cleanup performs final cleanup when broadcaster shuts down
-func (b *Broadcaster) cleanup() {
-	b.shutdownOnce.Do(func() {
-		utils.LogInfo("BROADCASTER", "Performing cleanup")
-		
-		b.mu.Lock()
-		for client := range b.clients {
-			client.safeClose()
-		}
-		b.clients = make(map[*Client]bool)
-		b.mu.Unlock()
-		
-		// Drain channels
-		go func() {
-			for {
-				select {
-				case <-b.register:
-				case <-b.unregister:
-				default:
-					return
-				}
+// GetShardStats returns statistics for all shards with enhanced information
+func (sb *Broadcaster) GetShardStats() map[string]interface{} {
+	stats := make(map[string]interface{})
+	
+	totalActiveWorkers := 0
+	for i, shard := range sb.shards {
+		activeWorkers := 0
+		for _, worker := range shard.workers {
+			if atomic.LoadInt32(&worker.isActive) == 1 {
+				activeWorkers++
 			}
-		}()
+		}
+		totalActiveWorkers += activeWorkers
+		
+		shardStats := map[string]interface{}{
+			"clients":       atomic.LoadInt64(&shard.clientCount),
+			"workers":       len(shard.workers),
+			"active_workers": activeWorkers,
+		}
+		stats[fmt.Sprintf("shard_%d", i)] = shardStats
+	}
+	
+	stats["sharding_enabled"] = true
+	stats["type"] = "sharded"
+	stats["total_clients"] = sb.GetClientCount()
+	stats["total_shards"] = len(sb.shards)
+	stats["total_workers"] = len(sb.shards) * sb.config.WorkersPerShard
+	stats["total_active_workers"] = totalActiveWorkers
+	
+	return stats
+}
+
+// shutdown gracefully shuts down all shards
+func (sb *Broadcaster) shutdown() {
+	sb.shutdownOnce.Do(func() {
+		utils.LogInfo("SHARDED_BROADCASTER", "Shutting down %d shards", len(sb.shards))
+		for _, shard := range sb.shards {
+			shard.cancel()
+		}
 	})
 }
 
@@ -571,7 +743,7 @@ func (c *Client) writePump(unregister chan<- *Client) {
 		ticker.Stop()
 		c.safeClose()
 	}()
-	
+
 	for {
 		select {
 		case message, ok := <-c.send:
@@ -583,14 +755,14 @@ func (c *Client) writePump(unregister chan<- *Client) {
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			
+
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					utils.LogDebug("BROADCASTER", "Write error for client %s: %v", c.id, err)
+					utils.LogDebug("SHARDED_BROADCASTER", "Write error for client %s: %v", c.id, err)
 				}
 				return
 			}
-			
+
 		case <-ticker.C:
 			// Send periodic ping
 			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -612,22 +784,22 @@ func (c *Client) readPump(unregister chan<- *Client) {
 			c.safeClose()
 		}
 	}()
-	
+
 	c.conn.SetReadLimit(512)
 	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	
+
 	// Set pong handler to update last pong time
 	c.conn.SetPongHandler(func(string) error {
 		c.lastPong = time.Now()
 		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		return nil
 	})
-	
+
 	for {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				utils.LogDebug("BROADCASTER", "Read error for client %s: %v", c.id, err)
+				utils.LogDebug("SHARDED_BROADCASTER", "Read error for client %s: %v", c.id, err)
 			}
 			break
 		}
@@ -643,5 +815,54 @@ func (c *Client) GetID() string {
 
 // generateClientID generates a unique client ID
 func generateClientID() string {
-	return utils.DefaultGenerateID("client")
+	bytes := make([]byte, 8)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
+
+// sendInitialChartData sends immediate chart data to a newly connected client
+func (sb *Broadcaster) sendInitialChartData(client *Client) {
+	defer func() {
+		if r := recover(); r != nil {
+			utils.LogError("SHARDED_BROADCASTER", "Panic sending initial chart data to client %s: %v", client.id, r)
+		}
+	}()
+	
+	utils.LogDebug("SHARDED_BROADCASTER", "Sending initial chart data to client %s", client.id)
+	
+	// Get chart data with timeout
+	chartDataChan := make(chan interface{}, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				utils.LogError("SHARDED_BROADCASTER", "Panic fetching initial chart data: %v", r)
+			}
+		}()
+		chartData := sb.statsCollector.GetChartDataForFrontend()
+		select {
+		case chartDataChan <- chartData:
+		default:
+		}
+	}()
+	
+	// Send chart data to the specific client
+	select {
+	case chartData := <-chartDataChan:
+		data, err := utils.DefaultMarshalChart(chartData)
+		if err != nil {
+			utils.LogError("SHARDED_BROADCASTER", "Failed to marshal initial chart data for client %s: %v", client.id, err)
+			return
+		}
+		
+		// Send to the specific client with timeout
+		select {
+		case client.send <- data:
+			utils.LogDebug("SHARDED_BROADCASTER", "Sent initial chart data to client %s", client.id)
+		case <-time.After(1 * time.Second):
+			utils.LogWarn("SHARDED_BROADCASTER", "Timeout sending initial chart data to client %s", client.id)
+		}
+		
+	case <-time.After(2 * time.Second):
+		utils.LogWarn("SHARDED_BROADCASTER", "Timeout fetching initial chart data for client %s", client.id)
+	}
 } 

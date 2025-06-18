@@ -136,6 +136,10 @@ func (c *Coordinator) Start(ctx context.Context) error {
 
 // runStatsCollector runs the stats collection thread
 func (c *Coordinator) runStatsCollector(ctx context.Context) {
+	// Create timer for periodic chart data updates
+	chartUpdateTicker := time.NewTicker(15 * time.Second)
+	defer chartUpdateTicker.Stop()
+	
 	for {
 		select {
 		case <-ctx.Done():
@@ -144,6 +148,10 @@ func (c *Coordinator) runStatsCollector(ctx context.Context) {
 		case transfer := <-c.channels.StatsUpdates:
 			// Process transfer for stats (non-blocking)
 			c.processTransferForStats(transfer)
+			
+		case <-chartUpdateTicker.C:
+			// Send periodic chart data updates to broadcaster
+			c.sendChartDataUpdate()
 			
 		case <-time.After(30 * time.Second):
 			// Periodic health check
@@ -162,6 +170,43 @@ func (c *Coordinator) processTransferForStats(transfer models.Transfer) {
 	
 	// Add to stats collector (should be fast)
 	c.statsCollector.ProcessTransfer(transfer)
+}
+
+// sendChartDataUpdate sends chart data to the ChartUpdates channel
+func (c *Coordinator) sendChartDataUpdate() {
+	defer func() {
+		if r := recover(); r != nil {
+			utils.LogError("COORDINATOR", "Error sending chart data update: %v", r)
+		}
+	}()
+	
+	// Get chart data from stats collector with timeout
+	chartDataChan := make(chan interface{}, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				utils.LogError("COORDINATOR", "Panic fetching chart data: %v", r)
+			}
+		}()
+		chartData := c.statsCollector.GetChartDataForFrontend()
+		select {
+		case chartDataChan <- chartData:
+		default:
+		}
+	}()
+	
+	// Send chart data to broadcaster with timeout
+	select {
+	case chartData := <-chartDataChan:
+		select {
+		case c.channels.ChartUpdates <- chartData:
+			utils.LogDebug("COORDINATOR", "Sent chart data update to broadcaster")
+		case <-time.After(100 * time.Millisecond):
+			utils.LogWarn("COORDINATOR", "Chart update channel full, skipping update")
+		}
+	case <-time.After(2 * time.Second):
+		utils.LogWarn("COORDINATOR", "Timeout fetching chart data for update")
+	}
 }
 
 // logStatsHealth logs periodic stats health information
