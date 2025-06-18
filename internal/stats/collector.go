@@ -135,7 +135,7 @@ func DefaultConfig() Config {
 		// Performance settings
 		MaxHLLMemoryMB:       50,
 		BatchProcessingSize:  10,
-		CacheUpdateInterval:  5 * time.Second, // REVERTED: Fast updates for responsiveness
+		CacheUpdateInterval:  5 * time.Second,
 	}
 }
 
@@ -2797,10 +2797,10 @@ func (c *Collector) getAssetVolumeTimeScale() map[string]interface{} {
 
 // getTopAssetsFromBuckets gets top assets from specific bucket types within a time range
 func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularities []string, limit int) []AssetStats {
-	// Collect relevant buckets from specified granularities
+	// Collect relevant buckets from ALL specified granularities (not just the first one with data)
 	var relevantBuckets []*StatsBucket
 	
-	// Process each granularity in order of preference
+	// Process each granularity and collect ALL relevant buckets
 	for _, granularity := range granularities {
 		var buckets map[time.Time]*StatsBucket
 		
@@ -2819,16 +2819,11 @@ func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularitie
 			continue
 		}
 		
-		// Collect buckets in the time range
+		// Collect buckets in the time range from this granularity
 		for timestamp, bucket := range buckets {
 			if timestamp.After(since) && timestamp.Before(until) {
 				relevantBuckets = append(relevantBuckets, bucket)
 			}
-		}
-		
-		// If we found data in this granularity, we can stop (prefer higher resolution)
-		if len(relevantBuckets) > 0 {
-			break
 		}
 	}
 	
@@ -3009,7 +3004,7 @@ func (c *Collector) getTopAssetsFromSnapshotBuckets(since, until time.Time,
 	
 	assetAggregates := make(map[string]*AssetStats)
 	
-	// Process buckets in order of preference (10s -> 1m -> 1h)
+	// Process ALL bucket types (not just the first one with data)
 	bucketSets := []map[time.Time]*StatsBucket{buckets10s, buckets1m, buckets1h}
 	
 	for _, buckets := range bucketSets {
@@ -3087,11 +3082,6 @@ func (c *Collector) getTopAssetsFromSnapshotBuckets(since, until time.Time,
 					}
 				}
 			}
-		}
-		
-		// If we found data in this bucket type, prefer it
-		if len(assetAggregates) > 0 {
-			break
 		}
 	}
 	
