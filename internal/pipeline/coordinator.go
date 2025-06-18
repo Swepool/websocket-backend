@@ -105,8 +105,8 @@ func (c *Coordinator) Start(ctx context.Context) error {
 	c.cancel = cancel
 	
 	// Start all threads concurrently
-	c.wg.Add(7) // Still 7 threads: sync manager + 4 core + chart updater + chart broadcaster
-	utils.LogInfo("COORDINATOR", "Starting 7 pipeline threads with bidirectional sync")
+	c.wg.Add(6) // Now 6 threads: sync manager + 4 core + chart updater (broadcaster is event-driven)
+	utils.LogInfo("COORDINATOR", "Starting 6 pipeline threads with bidirectional sync + event-driven chart broadcasting")
 	
 	// Thread 1: SyncManager (replaces Fetcher - handles both forward and backward sync)
 	go func() {
@@ -163,7 +163,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		c.broadcaster.Start(ctx)
 	}()
 	
-	// Thread 6: Chart Updater (background chart computation)
+	// Thread 6: Chart Updater (triggers event-driven chart broadcasts)
 	go func() {
 		defer c.wg.Done()
 		defer func() {
@@ -174,22 +174,10 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		c.startChartUpdater(ctx)
 	}()
 	
-	// Thread 7: Chart Broadcaster (WebSocket chart updates)
-	go func() {
-		defer c.wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				utils.LogError("COORDINATOR", "Chart Broadcaster panic recovered: %v", r)
-			}
-		}()
-		c.chartBroadcaster.Start()
-		
-		// Wait for context cancellation
-		<-ctx.Done()
-		c.chartBroadcaster.Stop()
-	}()
+	// Initialize chart broadcaster (event-driven, no separate thread needed)
+	c.chartBroadcaster.Start()
 	
-	utils.LogInfo("COORDINATOR", "All pipeline threads started successfully with bidirectional sync")
+	utils.LogInfo("COORDINATOR", "All pipeline threads started successfully with event-driven chart broadcasting")
 	
 	// Log initial sync status
 	c.logSyncStatus()
@@ -213,7 +201,7 @@ func (c *Coordinator) startChartUpdater(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	
-	utils.LogInfo("COORDINATOR", "Starting chart updater with 15-second intervals")
+	utils.LogInfo("COORDINATOR", "Starting chart updater with 15-second intervals (event-driven broadcasts)")
 	
 	// Run initial update and warm cache
 	if err := c.chartUpdater.UpdateAllChartSummaries(); err != nil {
@@ -224,6 +212,8 @@ func (c *Coordinator) startChartUpdater(ctx context.Context) {
 			utils.LogError("COORDINATOR", "Failed to warm initial cache: %v", err)
 		} else {
 			utils.LogInfo("COORDINATOR", "🔥 Initial chart summaries updated and cache warmed")
+			// Trigger broadcast since cache was updated
+			c.chartBroadcaster.TriggerBroadcast()
 		}
 	}
 	
@@ -241,6 +231,8 @@ func (c *Coordinator) startChartUpdater(ctx context.Context) {
 					utils.LogError("COORDINATOR", "Failed to warm cache after update: %v", err)
 				} else {
 					utils.LogDebug("COORDINATOR", "🔥 Chart summaries updated and cache warmed")
+					// Trigger broadcast only when cache is actually updated
+					c.chartBroadcaster.TriggerBroadcast()
 				}
 			}
 		}
@@ -321,10 +313,11 @@ func (c *Coordinator) GetPipelineStats() map[string]interface{} {
 			"realisticTiming":    true,
 			"microSpacing":       true,
 			"chartUpdateInterval": "15s",
+			"chartBroadcastMode": "event_driven",
 			"dataFlow": []string{
 				"SyncManager → [RawTransfers] → Processor → [ProcessedTransfers] → Scheduler → [TransferBroadcasts] → Broadcaster",
 				"SyncManager → [DatabaseSaves] → Database Writer",
-				"Database → Chart Updater (15s) → Chart Broadcaster → WebSocket",
+				"Database → Chart Updater (15s) → Chart Cache Refresh → Event-Driven Broadcast → WebSocket",
 			},
 		},
 	}
@@ -340,6 +333,10 @@ func (c *Coordinator) Stop() {
 		// Stop sync manager first
 		c.syncManager.Stop()
 		utils.LogInfo("COORDINATOR", "SyncManager stopped")
+		
+		// Stop chart broadcaster
+		c.chartBroadcaster.Stop()
+		utils.LogInfo("COORDINATOR", "Chart broadcaster stopped")
 		
 		// Cancel context to signal shutdown to all components
 		c.cancel()

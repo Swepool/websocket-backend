@@ -1,7 +1,6 @@
 package database
 
 import (
-	"time"
 	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/internal/broadcaster"
 )
@@ -10,7 +9,6 @@ import (
 type ChartBroadcaster struct {
 	chartService *EnhancedChartService
 	broadcaster  broadcaster.BroadcasterInterface
-	ticker       *time.Ticker
 	stopCh       chan struct{}
 }
 
@@ -23,35 +21,25 @@ func NewChartBroadcaster(chartService *EnhancedChartService, broadcasterInstance
 	}
 }
 
-// Start begins broadcasting chart updates every 15 seconds
+// Start begins broadcasting chart updates on-demand (when cache is refreshed)
 func (cb *ChartBroadcaster) Start() {
-	cb.ticker = time.NewTicker(10 * time.Second)
-	
-	utils.LogInfo("CHART_BROADCASTER", "Starting chart data broadcasts every 15 seconds")
+	utils.LogInfo("CHART_BROADCASTER", "Starting chart broadcaster (event-driven mode)")
 	
 	// Send initial chart data immediately
 	go cb.broadcastChartData()
 	
-	// Start periodic broadcasting
-	go func() {
-		for {
-			select {
-			case <-cb.ticker.C:
-				cb.broadcastChartData()
-			case <-cb.stopCh:
-				return
-			}
-		}
-	}()
+	// No timer - broadcasts are now triggered by cache updates
 }
 
 // Stop stops the chart broadcaster
 func (cb *ChartBroadcaster) Stop() {
-	if cb.ticker != nil {
-		cb.ticker.Stop()
-	}
 	close(cb.stopCh)
 	utils.LogInfo("CHART_BROADCASTER", "Chart broadcaster stopped")
+}
+
+// TriggerBroadcast triggers an immediate chart data broadcast (called when cache is updated)
+func (cb *ChartBroadcaster) TriggerBroadcast() {
+	go cb.broadcastChartData()
 }
 
 // BroadcastChartData sends current chart data to all WebSocket clients
