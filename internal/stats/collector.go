@@ -150,6 +150,9 @@ type Collector struct {
 	cleanupMu      sync.Mutex   // Protects cleanup operations
 	snapshotMu     sync.RWMutex // Protects snapshot operations
 	
+	// CRITICAL FIX: Add mutex for global HLL and shared maps
+	globalMu       sync.RWMutex // Protects global HLL sketches and shared maps
+	
 	// 5-tier time-based buckets for 1-year maximum retention
 	buckets10s     map[time.Time]*StatsBucket
 	buckets1m      map[time.Time]*StatsBucket
@@ -545,11 +548,25 @@ func (l *LiveBucketSource) Get1hBuckets() map[time.Time]*StatsBucket { return l.
 func (l *LiveBucketSource) GetDailyBuckets() map[time.Time]*StatsBucket { return l.collector.bucketsDaily }
 func (l *LiveBucketSource) GetWeeklyBuckets() map[time.Time]*StatsBucket { return l.collector.bucketsWeekly }
 func (l *LiveBucketSource) GetGlobalHLLEstimates() (int64, int64, int64) {
+	// CRITICAL FIX: Protect global HLL read access
+	l.collector.globalMu.RLock()
+	defer l.collector.globalMu.RUnlock()
 	return int64(l.collector.globalSendersHLL.Estimate()),
 		   int64(l.collector.globalReceiversHLL.Estimate()),
 		   int64(l.collector.globalWalletsHLL.Estimate())
 }
-func (l *LiveBucketSource) GetDenomToSymbol() map[string]string { return l.collector.denomToSymbol }
+func (l *LiveBucketSource) GetDenomToSymbol() map[string]string { 
+	// CRITICAL FIX: Protect shared map read access
+	l.collector.globalMu.RLock()
+	defer l.collector.globalMu.RUnlock()
+	
+	// Return a copy to avoid concurrent access
+	result := make(map[string]string)
+	for k, v := range l.collector.denomToSymbol {
+		result[k] = v
+	}
+	return result
+}
 func (l *LiveBucketSource) GetStartTime() time.Time { return l.collector.startTime }
 
 // SnapshotBucketSource wraps snapshot data to implement BucketSource
@@ -649,10 +666,12 @@ func (c *Collector) processTransferUnsafe(transfer models.Transfer) {
 	// Update bucket stats
 	c.updateBucket(bucket, transfer)
 	
-	// Update global HLL
+	// Update global HLL and shared maps with proper synchronization
 	senderBytes := []byte(strings.ToLower(transfer.SenderCanonical))
 	receiverBytes := []byte(strings.ToLower(transfer.ReceiverCanonical))
 	
+	// CRITICAL FIX: Protect global HLL and shared map access
+	c.globalMu.Lock()
 	c.globalSendersHLL.Insert(senderBytes)
 	c.globalReceiversHLL.Insert(receiverBytes)
 	c.globalWalletsHLL.Insert(senderBytes)
@@ -662,6 +681,7 @@ func (c *Collector) processTransferUnsafe(transfer models.Transfer) {
 	if transfer.BaseTokenSymbol != "" {
 		c.denomToSymbol[transfer.BaseTokenSymbol] = transfer.BaseTokenSymbol
 	}
+	c.globalMu.Unlock()
 	
 	// Periodic cleanup (run in background)
 	if time.Since(c.lastCleanup) > c.config.CleanupInterval {
@@ -795,6 +815,8 @@ func (c *Collector) updateAggregateCache() {
 	chainFlows := c.getChainFlows(now.Add(-time.Minute))
 	topAssets := c.getTopAssets(now.Add(-time.Minute), c.config.TopItemsLimit)
 	
+	// Calculate unique wallets with proper synchronization
+	c.globalMu.RLock()
 	uniqueWallets := struct {
 		Senders   int64
 		Receivers int64
@@ -804,6 +826,7 @@ func (c *Collector) updateAggregateCache() {
 		Receivers: int64(c.globalReceiversHLL.Estimate()),
 		Total:     int64(c.globalWalletsHLL.Estimate()),
 	}
+	c.globalMu.RUnlock()
 	
 	c.computeMu.RUnlock()
 	
@@ -930,6 +953,8 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 	bucket.Receivers[transfer.ReceiverCanonical]++
 	
 	// Store chain info for address formatting (if not already stored)
+	// CRITICAL FIX: Protect shared map access
+	c.globalMu.Lock()
 	if _, exists := c.addressChainInfo[transfer.SenderCanonical]; !exists {
 		c.addressChainInfo[transfer.SenderCanonical] = &AddressChainInfo{
 			RpcType:    transfer.SourceChain.RpcType,
@@ -942,6 +967,7 @@ func (c *Collector) updateBucket(bucket *StatsBucket, transfer models.Transfer) 
 			AddrPrefix: transfer.DestinationChain.AddrPrefix,
 		}
 	}
+	c.globalMu.Unlock()
 	
 	// Update asset stats using same logic as original implementation
 	symbol := transfer.BaseTokenSymbol
@@ -1132,7 +1158,8 @@ func (c *Collector) GetChartData() ChartData {
 	// Calculate transfer rates
 	transferRates := c.calculateTransferRates(now)
 	
-	// Calculate unique wallets
+	// Calculate unique wallets with proper synchronization
+	c.globalMu.RLock()
 	uniqueWallets := struct {
 		Senders   int64 `json:"senders"`
 		Receivers int64 `json:"receivers"`
@@ -1142,6 +1169,7 @@ func (c *Collector) GetChartData() ChartData {
 		Receivers: int64(c.globalReceiversHLL.Estimate()),
 		Total:     int64(c.globalWalletsHLL.Estimate()),
 	}
+	c.globalMu.RUnlock()
 	
 	// Get top routes, chains, and assets (using same timeframe as transfer rates)
 	topRoutes := c.getTopRoutes(now.Add(-time.Minute), c.config.TopItemsLimit)
@@ -2405,24 +2433,24 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 			result.ChainIncoming[chainID] += count
 		}
 		
-		// Merge chain HLL sketches with optimized precision
+		// Merge chain HLL sketches with thread safety
 		for chainID, hll := range bucket.ChainSendersHLL {
 			if result.ChainSendersHLL[chainID] == nil {
 				result.ChainSendersHLL[chainID] = hllManager.getOptimizedHLL("chain")
 			}
-			result.ChainSendersHLL[chainID].Merge(hll)
+			c.mergeHLLSketchSafe(result.ChainSendersHLL[chainID], hll)
 		}
 		for chainID, hll := range bucket.ChainReceiversHLL {
 			if result.ChainReceiversHLL[chainID] == nil {
 				result.ChainReceiversHLL[chainID] = hllManager.getOptimizedHLL("chain")
 			}
-			result.ChainReceiversHLL[chainID].Merge(hll)
+			c.mergeHLLSketchSafe(result.ChainReceiversHLL[chainID], hll)
 		}
 		for chainID, hll := range bucket.ChainUsersHLL {
 			if result.ChainUsersHLL[chainID] == nil {
 				result.ChainUsersHLL[chainID] = hllManager.getOptimizedHLL("chain")
 			}
-			result.ChainUsersHLL[chainID].Merge(hll)
+			c.mergeHLLSketchSafe(result.ChainUsersHLL[chainID], hll)
 		}
 
 		// Merge chain assets
@@ -2443,12 +2471,12 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 					if asset.LastActivity > existing.LastActivity {
 						existing.LastActivity = asset.LastActivity
 					}
-					// Merge HLL sketches with optimized precision
+					// Merge HLL sketches with thread safety
 					if asset.HoldersHLL != nil {
 						if existing.HoldersHLL == nil {
 							existing.HoldersHLL = hllManager.getOptimizedHLL("asset")
 						}
-						existing.HoldersHLL.Merge(asset.HoldersHLL)
+						c.mergeHLLSketchSafe(existing.HoldersHLL, asset.HoldersHLL)
 					}
 				} else {
 					// Create new aggregate with optimized HLL
@@ -2464,7 +2492,7 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 						HoldersHLL:    hllManager.getOptimizedHLL("asset"),
 					}
 					if asset.HoldersHLL != nil {
-						newAsset.HoldersHLL.Merge(asset.HoldersHLL)
+						c.mergeHLLSketchSafe(newAsset.HoldersHLL, asset.HoldersHLL)
 					}
 					result.ChainAssets[chainID][symbol] = newAsset
 				}
@@ -2494,12 +2522,12 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 					existing.LastActivity = asset.LastActivity
 				}
 				
-				// Merge HLL sketches for unique holder counting with optimized precision
+				// Merge HLL sketches for unique holder counting with thread safety
 				if asset.HoldersHLL != nil {
 					if existing.HoldersHLL == nil {
 						existing.HoldersHLL = hllManager.getOptimizedHLL("asset")
 					}
-					existing.HoldersHLL.Merge(asset.HoldersHLL)
+					c.mergeHLLSketchSafe(existing.HoldersHLL, asset.HoldersHLL)
 				}
 				
 				// Merge routes
@@ -2540,9 +2568,9 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 					HoldersHLL:      hllManager.getOptimizedHLL("asset"), // Initialize optimized HLL for aggregation
 				}
 				
-				// Copy HLL data if available
+				// Copy HLL data if available with thread safety
 				if asset.HoldersHLL != nil {
-					newAsset.HoldersHLL.Merge(asset.HoldersHLL)
+					c.mergeHLLSketchSafe(newAsset.HoldersHLL, asset.HoldersHLL)
 				}
 				
 				// Copy routes from original asset
@@ -2563,15 +2591,15 @@ func (c *Collector) aggregateStatsBuckets(buckets []*StatsBucket, granularity st
 			}
 		}
 		
-		// Merge HLL sketches
+		// Merge HLL sketches with thread safety
 		if bucket.SendersHLL != nil {
-			result.SendersHLL.Merge(bucket.SendersHLL)
+			c.mergeHLLSketchSafe(result.SendersHLL, bucket.SendersHLL)
 		}
 		if bucket.ReceiversHLL != nil {
-			result.ReceiversHLL.Merge(bucket.ReceiversHLL)
+			c.mergeHLLSketchSafe(result.ReceiversHLL, bucket.ReceiversHLL)
 		}
 		if bucket.WalletsHLL != nil {
-			result.WalletsHLL.Merge(bucket.WalletsHLL)
+			c.mergeHLLSketchSafe(result.WalletsHLL, bucket.WalletsHLL)
 		}
 	}
 	
@@ -3273,9 +3301,9 @@ func (c *Collector) cloneAssetStats(asset *AssetStats) *AssetStats {
 		HoldersHLL:      hllManager.getOptimizedHLL("asset"),
 	}
 	
-	// Copy HLL data if available
+	// Copy HLL data if available with thread safety
 	if asset.HoldersHLL != nil {
-		newAsset.HoldersHLL.Merge(asset.HoldersHLL)
+		c.mergeHLLSketchSafe(newAsset.HoldersHLL, asset.HoldersHLL)
 	}
 	
 	// Copy routes
@@ -3494,7 +3522,7 @@ func (c *Collector) cloneChainAssetStats(asset *ChainAssetStats) *ChainAssetStat
 		HoldersHLL:    hllManager.getOptimizedHLL("asset"),
 	}
 	if asset.HoldersHLL != nil {
-		newAsset.HoldersHLL.Merge(asset.HoldersHLL)
+		c.mergeHLLSketchSafe(newAsset.HoldersHLL, asset.HoldersHLL)
 	}
 	return newAsset
 }
