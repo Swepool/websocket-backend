@@ -100,10 +100,10 @@ func HighPerformanceConfig() Config {
 // getDefaultBroadcasterConfig returns broadcaster config with optimal sharding
 func getDefaultBroadcasterConfig() broadcaster.Config {
 	return broadcaster.Config{
-		NumShards:       4,
-		WorkersPerShard: 4,
-		MaxClients:      1000,
-		BufferSize:      100,
+		NumShards:       10,
+		WorkersPerShard: 6,
+		MaxClients:      2000,
+		BufferSize:      256,
 		DropSlowClients: true,
 	}
 }
