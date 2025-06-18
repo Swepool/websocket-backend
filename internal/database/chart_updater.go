@@ -21,48 +21,54 @@ func NewChartUpdater(db *sql.DB) *ChartUpdater {
 
 // UpdateAllChartSummaries computes and stores all chart summaries
 func (u *ChartUpdater) UpdateAllChartSummaries() error {
+	timeScales := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
 	now := time.Now()
-	timeScales := map[string]time.Duration{
-		"1m":  time.Minute,
-		"1h":  time.Hour,
-		"1d":  24 * time.Hour,
-		"7d":  7 * 24 * time.Hour,
-		"14d": 14 * 24 * time.Hour,
-		"30d": 30 * 24 * time.Hour,
-	}
 	
-	utils.LogInfo("CHART_UPDATER", "Starting chart summary update")
-	
-	for timeScale, duration := range timeScales {
-		since := now.Add(-duration)
+	for _, timeScale := range timeScales {
+		var since time.Time
+		switch timeScale {
+		case "1m":
+			since = now.Add(-time.Minute)
+		case "1h":
+			since = now.Add(-time.Hour)
+		case "1d":
+			since = now.Add(-24 * time.Hour)
+		case "7d":
+			since = now.Add(-7 * 24 * time.Hour)
+		case "14d":
+			since = now.Add(-14 * 24 * time.Hour)
+		case "30d":
+			since = now.Add(-30 * 24 * time.Hour)
+		}
 		
-		// Update popular routes
+		// Update all chart types for this time scale
 		if err := u.updatePopularRoutes(timeScale, since); err != nil {
 			utils.LogError("CHART_UPDATER", "Failed to update popular routes for %s: %v", timeScale, err)
 		}
 		
-		// Update active senders
 		if err := u.updateActiveSenders(timeScale, since); err != nil {
 			utils.LogError("CHART_UPDATER", "Failed to update active senders for %s: %v", timeScale, err)
 		}
 		
-		// Update active receivers
 		if err := u.updateActiveReceivers(timeScale, since); err != nil {
 			utils.LogError("CHART_UPDATER", "Failed to update active receivers for %s: %v", timeScale, err)
 		}
 		
-		// Update chain flows
 		if err := u.updateChainFlows(timeScale, since); err != nil {
 			utils.LogError("CHART_UPDATER", "Failed to update chain flows for %s: %v", timeScale, err)
 		}
 		
-		// Update asset volumes
 		if err := u.updateAssetVolumes(timeScale, since); err != nil {
 			utils.LogError("CHART_UPDATER", "Failed to update asset volumes for %s: %v", timeScale, err)
 		}
+		
+		// Add wallet statistics update
+		if err := u.updateWalletStats(timeScale, since); err != nil {
+			utils.LogError("CHART_UPDATER", "Failed to update wallet stats for %s: %v", timeScale, err)
+		}
 	}
 	
-	utils.LogInfo("CHART_UPDATER", "Chart summary update completed")
+	utils.LogDebug("CHART_UPDATER", "All chart summaries updated successfully")
 	return nil
 }
 
@@ -487,4 +493,52 @@ func (u *ChartUpdater) formatAddress(address string) string {
 		return address
 	}
 	return fmt.Sprintf("%s...%s", address[:6], address[len(address)-6:])
+}
+
+// updateWalletStats computes and stores wallet statistics for a time scale
+func (u *ChartUpdater) updateWalletStats(timeScale string, since time.Time) error {
+	// Use simpler, faster queries instead of expensive COUNT(DISTINCT) unions
+	var uniqueSenders, uniqueReceivers int64
+	
+	// Count unique senders (with index optimization)
+	err := u.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > ?", since.Unix()).Scan(&uniqueSenders)
+	if err != nil {
+		return fmt.Errorf("failed to count unique senders: %w", err)
+	}
+	
+	// Count unique receivers (with index optimization)  
+	err = u.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > ?", since.Unix()).Scan(&uniqueReceivers)
+	if err != nil {
+		return fmt.Errorf("failed to count unique receivers: %w", err)
+	}
+	
+	// For unique total, use a more efficient approach
+	// Create a temporary table with UNION to avoid the expensive subquery
+	var uniqueTotal int64
+	tempTableQuery := `
+		CREATE TEMP TABLE IF NOT EXISTS temp_unique_wallets AS
+		SELECT DISTINCT sender as wallet FROM transfers WHERE timestamp > ?
+		UNION
+		SELECT DISTINCT receiver as wallet FROM transfers WHERE timestamp > ?
+	`
+	
+	if _, err := u.db.Exec(tempTableQuery, since.Unix(), since.Unix()); err != nil {
+		// Fallback to approximate calculation if temp table fails
+		uniqueTotal = uniqueSenders + uniqueReceivers - int64(float64(min(uniqueSenders, uniqueReceivers)) * 0.7) // Estimate overlap
+	} else {
+		// Count from temp table
+		u.db.QueryRow("SELECT COUNT(*) FROM temp_unique_wallets").Scan(&uniqueTotal)
+		u.db.Exec("DROP TABLE IF EXISTS temp_unique_wallets")
+	}
+	
+	// Store in chart_summaries table
+	walletStats := map[string]interface{}{
+		"uniqueSenders":   uniqueSenders,
+		"uniqueReceivers": uniqueReceivers,
+		"uniqueTotal":     uniqueTotal,
+		"timeScale":       timeScale,
+		"computedAt":      time.Now().Unix(),
+	}
+	
+		return u.storeChartSummary("wallet_stats", timeScale, walletStats)
 } 

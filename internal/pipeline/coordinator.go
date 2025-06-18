@@ -57,16 +57,51 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 	p := processor.NewProcessor(config.Processor, ch)
 	s := scheduler.NewScheduler(config.Scheduler, ch)
 	
-	// Create enhanced chart service using the same database connection
-	chartService := database.NewEnhancedChartService(dbWriter.GetDB())
+	// Create optimized chart service based on database type
+	var chartService *database.EnhancedChartService
+	
+	if config.Database.DatabaseType == "postgresql" {
+		// Use PostgreSQL-optimized chart service with materialized views (ULTRA FAST)
+		pgChartService := database.NewPostgreSQLChartService(dbWriter.GetDB())
+		utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart service with materialized views")
+		
+		// Check materialized view status
+		if status, err := pgChartService.GetMaterializedViewStatus(); err == nil {
+			utils.LogInfo("COORDINATOR", "📊 Materialized view status: %+v", status)
+		}
+		
+		// Create a wrapper to make PostgreSQL service compatible with existing interface
+		chartService = database.NewEnhancedChartServiceWithPostgreSQL(dbWriter.GetDB(), pgChartService)
+		
+		// No need for WAL checkpoint in PostgreSQL
+		utils.LogInfo("COORDINATOR", "✅ PostgreSQL optimizations active - no WAL checkpoint needed")
+		
+	} else {
+		// Legacy SQLite3 chart service (slower but backward compatible)
+		chartService = database.NewEnhancedChartService(dbWriter.GetDB())
+		utils.LogWarn("COORDINATOR", "⚠️  Using legacy SQLite3 chart service - consider migrating to PostgreSQL")
+		
+		// Force WAL checkpoint before expensive cache warming queries (SQLite3 only)
+		utils.LogInfo("COORDINATOR", "Performing WAL checkpoint before cache warming...")
+		var busy, log, checkpointed int64
+		if err := dbWriter.GetDB().QueryRow("PRAGMA wal_checkpoint(RESTART)").Scan(&busy, &log, &checkpointed); err == nil {
+			utils.LogInfo("COORDINATOR", "WAL checkpoint completed: %d pages checkpointed, %d pages in log", checkpointed, log)
+			if log > 1000 {
+				utils.LogWarn("COORDINATOR", "Large WAL file detected (%d pages) - consider reducing wal_autocheckpoint", log)
+			}
+		} else {
+			utils.LogWarn("COORDINATOR", "WAL checkpoint failed: %v", err)
+		}
+	}
 	
 	// Load existing latency data from database on startup
 	if err := chartService.LoadLatencyDataFromDB(); err != nil {
 		utils.LogWarn("COORDINATOR", "Failed to load latency data from database: %v", err)
 	}
 	
-	// Pre-warm chart data cache on startup for fast initial client connections
 	utils.LogInfo("COORDINATOR", "Pre-warming chart data cache on startup...")
+	
+	// Pre-warm chart data cache on startup for fast initial client connections
 	if err := chartService.RefreshCache(); err != nil {
 		utils.LogWarn("COORDINATOR", "Failed to pre-warm chart cache on startup: %v", err)
 	} else {
