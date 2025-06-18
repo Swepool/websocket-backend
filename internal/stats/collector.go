@@ -1695,20 +1695,20 @@ func (c *Collector) calculatePeriodStatsUnified(since time.Time, source BucketSo
 				uniqueTotal[receiver] = true
 			}
 			
-			// Merge HLL sketches for unique counting
+			// Merge HLL sketches for unique counting with thread safety
 			if bucket.SendersHLL != nil {
-				sendersHLL.Merge(bucket.SendersHLL)
+				c.mergeHLLSketchSafe(sendersHLL, bucket.SendersHLL)
 			}
 			if bucket.ReceiversHLL != nil {
-				receiversHLL.Merge(bucket.ReceiversHLL)
+				c.mergeHLLSketchSafe(receiversHLL, bucket.ReceiversHLL)
 			}
 			if bucket.WalletsHLL != nil {
-				totalHLL.Merge(bucket.WalletsHLL)
+				c.mergeHLLSketchSafe(totalHLL, bucket.WalletsHLL)
 			}
 		}
 	}
 	
-	// Include 1-minute buckets for older data (beyond 1 hour)
+			// Include 1-minute buckets for older data (beyond 1 hour)
 	for timestamp, bucket := range source.Get1mBuckets() {
 		if (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-time.Hour)) {
 			transferCount += bucket.TransferCount
@@ -1724,18 +1724,18 @@ func (c *Collector) calculatePeriodStatsUnified(since time.Time, source BucketSo
 			}
 			
 			if bucket.SendersHLL != nil {
-				sendersHLL.Merge(bucket.SendersHLL)
+				c.mergeHLLSketchSafe(sendersHLL, bucket.SendersHLL)
 			}
 			if bucket.ReceiversHLL != nil {
-				receiversHLL.Merge(bucket.ReceiversHLL)
+				c.mergeHLLSketchSafe(receiversHLL, bucket.ReceiversHLL)
 			}
 			if bucket.WalletsHLL != nil {
-				totalHLL.Merge(bucket.WalletsHLL)
+				c.mergeHLLSketchSafe(totalHLL, bucket.WalletsHLL)
 			}
 		}
 	}
 	
-	// Include 1-hour buckets for oldest data (beyond 1 day)
+			// Include 1-hour buckets for oldest data (beyond 1 day)
 	for timestamp, bucket := range source.Get1hBuckets() {
 		if (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-24*time.Hour)) {
 			transferCount += bucket.TransferCount
@@ -1751,13 +1751,13 @@ func (c *Collector) calculatePeriodStatsUnified(since time.Time, source BucketSo
 			}
 			
 			if bucket.SendersHLL != nil {
-				sendersHLL.Merge(bucket.SendersHLL)
+				c.mergeHLLSketchSafe(sendersHLL, bucket.SendersHLL)
 			}
 			if bucket.ReceiversHLL != nil {
-				receiversHLL.Merge(bucket.ReceiversHLL)
+				c.mergeHLLSketchSafe(receiversHLL, bucket.ReceiversHLL)
 			}
 			if bucket.WalletsHLL != nil {
-				totalHLL.Merge(bucket.WalletsHLL)
+				c.mergeHLLSketchSafe(totalHLL, bucket.WalletsHLL)
 			}
 		}
 	}
@@ -2008,24 +2008,24 @@ func (c *Collector) getChainFlows(since time.Time) []ChainFlowStats {
 			chainIncoming[chainID] += count
 		}
 		
-		// Merge HLL sketches with optimized precision
+		// Merge HLL sketches with optimized precision and thread safety
 		for chainID, hll := range bucket.ChainSendersHLL {
 			if chainSendersHLL[chainID] == nil {
 				chainSendersHLL[chainID] = hllManager.getOptimizedHLL("chain")
 			}
-			chainSendersHLL[chainID].Merge(hll)
+			c.mergeHLLSketchSafe(chainSendersHLL[chainID], hll)
 		}
 		for chainID, hll := range bucket.ChainReceiversHLL {
 			if chainReceiversHLL[chainID] == nil {
 				chainReceiversHLL[chainID] = hllManager.getOptimizedHLL("chain")
 			}
-			chainReceiversHLL[chainID].Merge(hll)
+			c.mergeHLLSketchSafe(chainReceiversHLL[chainID], hll)
 		}
 		for chainID, hll := range bucket.ChainUsersHLL {
 			if chainUsersHLL[chainID] == nil {
 				chainUsersHLL[chainID] = hllManager.getOptimizedHLL("chain")
 			}
-			chainUsersHLL[chainID].Merge(hll)
+			c.mergeHLLSketchSafe(chainUsersHLL[chainID], hll)
 		}
 		
 		// Get chain names from routes
@@ -3327,14 +3327,57 @@ func (c *Collector) calculateTopRoutes(routes map[string]*AssetRouteStats, total
 	return routeSlice
 }
 
-// mergeHLLSafely safely merges HLL sketches with proper initialization
+// mergeHLLSafely safely merges HLL sketches with proper synchronization
 func (c *Collector) mergeHLLSafely(target **hyperloglog.Sketch, source *hyperloglog.Sketch, hllType string) {
 	if source != nil {
 		if *target == nil {
 			*target = hllManager.getOptimizedHLL(hllType)
 		}
+		
+		// CRITICAL FIX: Create a thread-safe clone to prevent race conditions
+		// The race condition occurs because Clone() iterates over internal maps
+		// while Insert() operations modify them concurrently.
+		
+		// Use MarshalBinary/UnmarshalBinary to create a safe copy
+		// This avoids the race condition in the Clone() method
+		sourceBytes, err := source.MarshalBinary()
+		if err == nil {
+			sourceClone := hllManager.getOptimizedHLL(hllType)
+			err = sourceClone.UnmarshalBinary(sourceBytes)
+			if err == nil {
+				// Now safely merge the clone with the target
+				(*target).Merge(sourceClone)
+				return
+			}
+		}
+		
+		// Fallback: if marshal/unmarshal fails, log the error and use direct merge
+		// This is potentially unsafe but better than silent failure
+		utils.LogWarn("stats.hll", "Failed to safely clone HLL sketch, using direct merge: %v", err)
 		(*target).Merge(source)
 	}
+}
+
+// mergeHLLSketchSafe safely merges one HLL sketch into another to prevent race conditions
+func (c *Collector) mergeHLLSketchSafe(target *hyperloglog.Sketch, source *hyperloglog.Sketch) {
+	if source == nil || target == nil {
+		return
+	}
+	
+	// Use the same safe cloning approach as mergeHLLSafely
+	sourceBytes, err := source.MarshalBinary()
+	if err == nil {
+		sourceClone := hllManager.getOptimizedHLL("bucket") // Use bucket type for most operations
+		err = sourceClone.UnmarshalBinary(sourceBytes)
+		if err == nil {
+			target.Merge(sourceClone)
+			return
+		}
+	}
+	
+	// Fallback to direct merge if safe clone fails
+	utils.LogWarn("stats.hll", "Failed to safely clone HLL sketch in mergeHLLSketchSafe, using direct merge: %v", err)
+	target.Merge(source)
 }
 
 // mergeOrSetRoute merges or sets a route in the route map
