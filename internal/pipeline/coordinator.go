@@ -47,11 +47,11 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 	// Configure bidirectional sync settings
 	syncManager.SetBackwardSyncConfig(
 		true,                 // Enable backward sync
-		7,                    // Sync back 7 days by default
+		30,                   // Sync back 30 days for full UI coverage
 		6*time.Hour,         // Start backward sync if gap > 6 hours
 	)
 	
-	utils.LogInfo("COORDINATOR", "Initialized SyncManager with bidirectional sync (7 days depth, 6h gap threshold)")
+	utils.LogInfo("COORDINATOR", "Initialized SyncManager with bidirectional sync (30 days depth, 6h gap threshold)")
 	
 	// Initialize other components
 	p := processor.NewProcessor(config.Processor, ch)

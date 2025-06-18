@@ -75,7 +75,7 @@ func (bf *BackwardFetcher) Start(ctx context.Context) {
 			transfers, err := bf.fetchBackwardBatch()
 			if err != nil {
 				utils.LogError("BACKWARD_FETCHER", "Failed to fetch backward batch: %v", err)
-				time.Sleep(5 * time.Second) // Wait before retry
+				time.Sleep(1 * time.Second) // Faster retry for backward sync
 				continue
 			}
 			
@@ -103,15 +103,15 @@ func (bf *BackwardFetcher) Start(ctx context.Context) {
 					batchCount, len(transfers), totalFetched)
 			} else {
 				utils.LogError("BACKWARD_FETCHER", "❌ BACKWARD: Failed to store batch %d (%d historical transfers)", batchCount+1, len(transfers))
-				time.Sleep(2 * time.Second) // Wait before retry
+				time.Sleep(500 * time.Millisecond) // Faster retry for database saves
 				continue
 			}
 			
 			// Update earliest sort order for next iteration
 			bf.earliestSortOrder = transfers[len(transfers)-1].SortOrder
 			
-			// Small delay to avoid overwhelming the API
-			time.Sleep(200 * time.Millisecond)
+			// Balanced delay for faster backward sync (respecting GraphQL limits)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }
@@ -179,7 +179,7 @@ func (bf *BackwardFetcher) fetchBackwardBatch() ([]models.Transfer, error) {
 	
 	variables := map[string]interface{}{
 		"page":  bf.earliestSortOrder,
-		"limit": bf.config.BatchSize,
+		"limit": bf.config.BatchSize, // Keep at 100 due to GraphQL limit
 	}
 	
 	requestBody := map[string]interface{}{
