@@ -1,0 +1,154 @@
+package database
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+	"websocket-backend-new/internal/utils"
+)
+
+// PostgreSQLChartUpdater handles chart updates with PostgreSQL-compatible syntax
+type PostgreSQLChartUpdater struct {
+	db *sql.DB
+}
+
+// NewPostgreSQLChartUpdater creates a PostgreSQL-optimized chart updater
+func NewPostgreSQLChartUpdater(db *sql.DB) *PostgreSQLChartUpdater {
+	return &PostgreSQLChartUpdater{db: db}
+}
+
+// UpdateAllChartSummaries updates chart summaries using PostgreSQL syntax
+func (u *PostgreSQLChartUpdater) UpdateAllChartSummaries() error {
+	timeScales := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
+	now := time.Now()
+	
+	for _, timeScale := range timeScales {
+		var since time.Time
+		switch timeScale {
+		case "1m":
+			since = now.Add(-time.Minute)
+		case "1h":
+			since = now.Add(-time.Hour)
+		case "1d":
+			since = now.Add(-24 * time.Hour)
+		case "7d":
+			since = now.Add(-7 * 24 * time.Hour)
+		case "14d":
+			since = now.Add(-14 * 24 * time.Hour)
+		case "30d":
+			since = now.Add(-30 * 24 * time.Hour)
+		}
+		
+		// Since we have materialized views, we can simply refresh them
+		// instead of manually updating each chart type
+		if err := u.refreshMaterializedViews(); err != nil {
+			utils.LogError("POSTGRESQL_CHART_UPDATER", "Failed to refresh materialized views: %v", err)
+			return err
+		}
+	}
+	
+	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "All materialized views refreshed successfully")
+	return nil
+}
+
+// refreshMaterializedViews refreshes all PostgreSQL materialized views
+func (u *PostgreSQLChartUpdater) refreshMaterializedViews() error {
+	_, err := u.db.Exec("SELECT refresh_analytics()")
+	if err != nil {
+		return fmt.Errorf("failed to refresh materialized views: %w", err)
+	}
+	
+	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "Materialized views refreshed")
+	return nil
+}
+
+// Alternative: Manual update methods for compatibility (if needed)
+
+// updatePopularRoutes updates popular routes using PostgreSQL syntax
+func (u *PostgreSQLChartUpdater) updatePopularRoutes(timeScale string, since time.Time) error {
+	// PostgreSQL uses proper timestamp comparison
+	query := `
+		SELECT source_chain, dest_chain, source_name, dest_name,
+		       COUNT(*) as count, MAX(timestamp) as last_activity
+		FROM transfers 
+		WHERE timestamp > $1 
+		GROUP BY source_chain, dest_chain, source_name, dest_name
+		ORDER BY count DESC 
+		LIMIT 10`
+	
+	rows, err := u.db.Query(query, since) // Pass timestamp directly, not Unix()
+	if err != nil {
+		return fmt.Errorf("failed to query popular routes: %w", err)
+	}
+	defer rows.Close()
+	
+	var routes []FrontendRouteData
+	for rows.Next() {
+		var route FrontendRouteData
+		var lastActivity time.Time
+		
+		err := rows.Scan(&route.FromChain, &route.ToChain, &route.FromName, 
+			&route.ToName, &route.Count, &lastActivity)
+		if err != nil {
+			continue
+		}
+		
+		route.Route = fmt.Sprintf("%s→%s", route.FromName, route.ToName)
+		routes = append(routes, route)
+	}
+	
+	// For now, we rely on materialized views instead of manual storage
+	// This method is kept for compatibility but not actively used
+	return nil
+}
+
+// updateWalletStats computes wallet statistics using PostgreSQL syntax
+func (u *PostgreSQLChartUpdater) updateWalletStats(timeScale string, since time.Time) error {
+	// Get unique senders count
+	var uniqueSenders int64
+	err := u.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", since).Scan(&uniqueSenders)
+	if err != nil {
+		return fmt.Errorf("failed to count unique senders: %w", err)
+	}
+	
+	// Get unique receivers count  
+	var uniqueReceivers int64
+	err = u.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", since).Scan(&uniqueReceivers)
+	if err != nil {
+		return fmt.Errorf("failed to count unique receivers: %w", err)
+	}
+	
+	// Estimate unique total (faster than expensive UNION)
+	var uniqueTotal int64
+	if uniqueSenders > 0 && uniqueReceivers > 0 {
+		// Estimate overlap (typically 20-30% for wallet data)
+		overlap := int64(float64(min(uniqueSenders, uniqueReceivers)) * 0.25)
+		uniqueTotal = uniqueSenders + uniqueReceivers - overlap
+	} else {
+		uniqueTotal = uniqueSenders + uniqueReceivers
+	}
+	
+	walletStats := map[string]interface{}{
+		"uniqueSenders":   uniqueSenders,
+		"uniqueReceivers": uniqueReceivers,
+		"uniqueTotal":     uniqueTotal,
+		"timeScale":       timeScale,
+		"calculatedAt":    time.Now().Format(time.RFC3339),
+	}
+	
+	// For now, we rely on materialized views instead of manual storage
+	// This method is kept for compatibility but not actively used
+	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "Wallet stats: %d senders, %d receivers, %d total", 
+		uniqueSenders, uniqueReceivers, uniqueTotal)
+	
+	return nil
+}
+
+// Helper function
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+} 

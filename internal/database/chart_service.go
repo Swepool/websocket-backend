@@ -599,15 +599,41 @@ func (c *EnhancedChartService) storeLatencyDataInDB(data []models.LatencyData) e
 		return nil
 	}
 	
-	// Prepare insert statement
-	insertSQL := `
-		INSERT OR REPLACE INTO latency_data (
-			source_chain, dest_chain, source_name, dest_name,
-			packet_ack_p5, packet_ack_median, packet_ack_p95,
-			packet_recv_p5, packet_recv_median, packet_recv_p95,
-			write_ack_p5, write_ack_median, write_ack_p95,
-			fetched_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	// Prepare insert statement with database-specific syntax
+	var insertSQL string
+	if c.usePostgreSQL {
+		// PostgreSQL syntax
+		insertSQL = `
+			INSERT INTO latency_data (
+				source_chain, dest_chain, source_name, dest_name,
+				packet_ack_p5, packet_ack_median, packet_ack_p95,
+				packet_recv_p5, packet_recv_median, packet_recv_p95,
+				write_ack_p5, write_ack_median, write_ack_p95,
+				fetched_at, created_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ON CONFLICT (source_chain, dest_chain, fetched_at) DO UPDATE SET
+				source_name = EXCLUDED.source_name,
+				dest_name = EXCLUDED.dest_name,
+				packet_ack_p5 = EXCLUDED.packet_ack_p5,
+				packet_ack_median = EXCLUDED.packet_ack_median,
+				packet_ack_p95 = EXCLUDED.packet_ack_p95,
+				packet_recv_p5 = EXCLUDED.packet_recv_p5,
+				packet_recv_median = EXCLUDED.packet_recv_median,
+				packet_recv_p95 = EXCLUDED.packet_recv_p95,
+				write_ack_p5 = EXCLUDED.write_ack_p5,
+				write_ack_median = EXCLUDED.write_ack_median,
+				write_ack_p95 = EXCLUDED.write_ack_p95`
+	} else {
+		// SQLite3 syntax
+		insertSQL = `
+			INSERT OR REPLACE INTO latency_data (
+				source_chain, dest_chain, source_name, dest_name,
+				packet_ack_p5, packet_ack_median, packet_ack_p95,
+				packet_recv_p5, packet_recv_median, packet_recv_p95,
+				write_ack_p5, write_ack_median, write_ack_p95,
+				fetched_at, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	}
 	
 	stmt, err := c.db.Prepare(insertSQL)
 	if err != nil {
@@ -615,7 +641,13 @@ func (c *EnhancedChartService) storeLatencyDataInDB(data []models.LatencyData) e
 	}
 	defer stmt.Close()
 	
-	now := time.Now().Unix()
+	var now interface{}
+	if c.usePostgreSQL {
+		now = time.Now() // PostgreSQL expects timestamp
+	} else {
+		now = time.Now().Unix() // SQLite3 expects Unix timestamp
+	}
+	
 	successCount := 0
 	
 	for _, latency := range data {
@@ -787,35 +819,35 @@ func (c *EnhancedChartService) storeNodeHealthDataInDB(healthData []models.NodeH
 		return nil
 	}
 	
-	// Create node_health table if it doesn't exist
-	createTableQuery := `
-		CREATE TABLE IF NOT EXISTS node_health (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			chain_id TEXT NOT NULL,
-			chain_name TEXT NOT NULL,
-			rpc_url TEXT NOT NULL,
-			rpc_type TEXT NOT NULL,
-			status TEXT NOT NULL,
-			response_time_ms INTEGER,
-			latest_block_height INTEGER,
-			error_message TEXT,
-			uptime REAL,
-			checked_at INTEGER NOT NULL,
-			UNIQUE(rpc_url, checked_at)
-		)
-	`
+	// Note: node_health table should already exist from schema creation
+	// Skip table creation since it was handled during schema initialization
+	// This avoids SQLite3 vs PostgreSQL syntax conflicts
 	
-	if _, err := c.db.Exec(createTableQuery); err != nil {
-		return fmt.Errorf("failed to create node_health table: %w", err)
+	// Insert health data with database-specific syntax
+	var insertQuery string
+	if c.usePostgreSQL {
+		// PostgreSQL syntax
+		insertQuery = `
+			INSERT INTO node_health 
+			(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
+			 latest_block_height, error_message, uptime, checked_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT (rpc_url, checked_at) DO UPDATE SET
+				status = EXCLUDED.status,
+				response_time_ms = EXCLUDED.response_time_ms,
+				latest_block_height = EXCLUDED.latest_block_height,
+				error_message = EXCLUDED.error_message,
+				uptime = EXCLUDED.uptime
+		`
+	} else {
+		// SQLite3 syntax
+		insertQuery = `
+			INSERT OR REPLACE INTO node_health 
+			(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
+			 latest_block_height, error_message, uptime, checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`
 	}
-	
-	// Insert health data
-	insertQuery := `
-		INSERT OR REPLACE INTO node_health 
-		(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
-		 latest_block_height, error_message, uptime, checked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
 	
 	stmt, err := c.db.Prepare(insertQuery)
 	if err != nil {
@@ -824,6 +856,13 @@ func (c *EnhancedChartService) storeNodeHealthDataInDB(healthData []models.NodeH
 	defer stmt.Close()
 	
 	for _, health := range healthData {
+		var checkTime interface{}
+		if c.usePostgreSQL {
+			checkTime = time.Unix(health.LastCheckTime, 0) // Convert Unix timestamp to time.Time for PostgreSQL
+		} else {
+			checkTime = health.LastCheckTime // Keep as Unix timestamp for SQLite3
+		}
+		
 		_, err := stmt.Exec(
 			health.ChainID,
 			health.ChainName,
@@ -834,7 +873,7 @@ func (c *EnhancedChartService) storeNodeHealthDataInDB(healthData []models.NodeH
 			health.LatestBlockHeight,
 			health.ErrorMessage,
 			health.Uptime,
-			health.LastCheckTime,
+			checkTime,
 		)
 		
 		if err != nil {

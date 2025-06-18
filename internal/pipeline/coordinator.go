@@ -22,7 +22,7 @@ type Coordinator struct {
 	broadcaster     broadcaster.BroadcasterInterface
 	dbWriter        *database.Writer
 	chartService    *database.EnhancedChartService
-	chartUpdater    *database.ChartUpdater
+	chartUpdater    interface{ UpdateAllChartSummaries() error }
 	chartBroadcaster *database.ChartBroadcaster
 	
 	channels    *channels.Channels
@@ -108,8 +108,20 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 		utils.LogInfo("COORDINATOR", "✅ Chart data cache pre-warmed for fast initial connections")
 	}
 	
-	// Create chart updater for background processing
-	chartUpdater := database.NewChartUpdater(dbWriter.GetDB())
+	// Create chart updater for background processing (PostgreSQL-compatible)
+	var chartUpdater interface {
+		UpdateAllChartSummaries() error
+	}
+	
+	if config.Database.DatabaseType == "postgresql" {
+		// Use PostgreSQL-optimized chart updater
+		chartUpdater = database.NewPostgreSQLChartUpdater(dbWriter.GetDB())
+		utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart updater")
+	} else {
+		// Use legacy SQLite3 chart updater
+		chartUpdater = database.NewChartUpdater(dbWriter.GetDB())
+		utils.LogWarn("COORDINATOR", "⚠️  Using legacy SQLite3 chart updater")
+	}
 	
 	// Create broadcaster
 	b := broadcaster.CreateBroadcaster(config.Broadcaster, ch)
