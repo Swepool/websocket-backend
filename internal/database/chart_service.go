@@ -16,6 +16,10 @@ type EnhancedChartService struct {
 	latencyData []models.LatencyData
 	latencyMu   sync.RWMutex
 	
+	// Node health data
+	nodeHealthData []models.NodeHealthData
+	healthMu       sync.RWMutex
+	
 	// Cache for expensive chart data (always served to clients)
 	cachedChartData map[string]interface{}
 	chartCacheMu    sync.RWMutex
@@ -27,6 +31,7 @@ func NewEnhancedChartService(db *sql.DB) *EnhancedChartService {
 	return &EnhancedChartService{
 		db:              db,
 		latencyData:     []models.LatencyData{},
+		nodeHealthData:  []models.NodeHealthData{},
 		cachedChartData: nil,
 	}
 }
@@ -176,6 +181,15 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 	totalOutgoing, totalIncoming := c.calculateChainTotals(now.Add(-time.Minute))
 	totalAssets, totalVolume, totalTransfers := c.calculateAssetTotals(now.Add(-time.Minute))
 	
+	// Get node health summary
+	nodeHealthSummary, err := c.GetNodeHealthSummary()
+	if err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to get node health summary: %v", err)
+	} else {
+		utils.LogDebug("CHART_SERVICE", "Node health summary: %d total nodes, %d healthy", 
+			nodeHealthSummary.TotalNodes, nodeHealthSummary.HealthyNodes)
+	}
+	
 	// Build frontend-compatible response
 	chartData := map[string]interface{}{
 		"currentRates":           transferRates,
@@ -202,6 +216,7 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
 		},
 		"latencyData":       c.GetLatencyData(),
+		"nodeHealthData":    nodeHealthSummary,
 		"dataAvailability":  transferRates.DataAvailability,
 		"timestamp":         now,
 	}
@@ -654,4 +669,223 @@ func (c *EnhancedChartService) GetCacheStats() map[string]interface{} {
 	}
 	
 	return stats
+}
+
+// SetNodeHealthData updates the stored node health data (called by health callback)
+func (c *EnhancedChartService) SetNodeHealthData(data []models.NodeHealthData) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	
+	// Store in memory for immediate access
+	c.nodeHealthData = data
+	
+	// Store in database for persistence
+	if err := c.storeNodeHealthDataInDB(data); err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to store node health data in database: %v", err)
+	}
+	
+	utils.LogInfo("CHART_SERVICE", "Updated node health data with %d nodes", len(data))
+}
+
+// GetNodeHealthData returns the current node health data
+func (c *EnhancedChartService) GetNodeHealthData() []models.NodeHealthData {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	// Return a copy to prevent external modifications
+	result := make([]models.NodeHealthData, len(c.nodeHealthData))
+	copy(result, c.nodeHealthData)
+	return result
+}
+
+// storeNodeHealthDataInDB stores node health data in the database
+func (c *EnhancedChartService) storeNodeHealthDataInDB(healthData []models.NodeHealthData) error {
+	if len(healthData) == 0 {
+		return nil
+	}
+	
+	// Create node_health table if it doesn't exist
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS node_health (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			chain_id TEXT NOT NULL,
+			chain_name TEXT NOT NULL,
+			rpc_url TEXT NOT NULL,
+			rpc_type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			response_time_ms INTEGER,
+			latest_block_height INTEGER,
+			error_message TEXT,
+			uptime REAL,
+			checked_at INTEGER NOT NULL,
+			UNIQUE(rpc_url, checked_at)
+		)
+	`
+	
+	if _, err := c.db.Exec(createTableQuery); err != nil {
+		return fmt.Errorf("failed to create node_health table: %w", err)
+	}
+	
+	// Insert health data
+	insertQuery := `
+		INSERT OR REPLACE INTO node_health 
+		(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
+		 latest_block_height, error_message, uptime, checked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	
+	stmt, err := c.db.Prepare(insertQuery)
+	if err != nil {
+		return fmt.Errorf("failed to prepare insert statement: %w", err)
+	}
+	defer stmt.Close()
+	
+	for _, health := range healthData {
+		_, err := stmt.Exec(
+			health.ChainID,
+			health.ChainName,
+			health.RpcURL,
+			health.RpcType,
+			health.Status,
+			health.ResponseTimeMs,
+			health.LatestBlockHeight,
+			health.ErrorMessage,
+			health.Uptime,
+			health.LastCheckTime,
+		)
+		
+		if err != nil {
+			utils.LogError("CHART_SERVICE", "Failed to insert health data for %s: %v", 
+				health.RpcURL, err)
+			continue
+		}
+	}
+	
+	return nil
+}
+
+// GetNodeHealthSummary returns aggregated node health data for charts
+func (c *EnhancedChartService) GetNodeHealthSummary() (*models.NodeHealthSummary, error) {
+	c.healthMu.RLock()
+	healthData := make([]models.NodeHealthData, len(c.nodeHealthData))
+	copy(healthData, c.nodeHealthData)
+	c.healthMu.RUnlock()
+	
+	if len(healthData) == 0 {
+		return &models.NodeHealthSummary{
+			TotalNodes:       0,
+			HealthyNodes:     0,
+			DegradedNodes:    0,
+			UnhealthyNodes:   0,
+			AvgResponseTime:  0,
+			NodesWithRpcs:    []models.NodeHealthData{},
+			ChainHealthStats: make(map[string]models.ChainHealthStat),
+			DataAvailability: models.NodeHealthAvailability{
+				HasMinute: false,
+				HasHour:   false,
+				HasDay:    false,
+				Has7Days:  false,
+				Has14Days: false,
+				Has30Days: false,
+			},
+		}, nil
+	}
+	
+	// Calculate summary statistics
+	totalNodes := len(healthData)
+	healthyNodes := 0
+	degradedNodes := 0
+	unhealthyNodes := 0
+	totalResponseTime := 0
+	responseTimeCount := 0
+	
+	chainStats := make(map[string]*models.ChainHealthStat)
+	
+	for _, node := range healthData {
+		switch node.Status {
+		case "healthy":
+			healthyNodes++
+			if node.ResponseTimeMs > 0 {
+				totalResponseTime += node.ResponseTimeMs
+				responseTimeCount++
+			}
+		case "degraded":
+			degradedNodes++
+			if node.ResponseTimeMs > 0 {
+				totalResponseTime += node.ResponseTimeMs
+				responseTimeCount++
+			}
+		case "unhealthy":
+			unhealthyNodes++
+		}
+		
+		// Aggregate by chain
+		if _, exists := chainStats[node.ChainName]; !exists {
+			chainStats[node.ChainName] = &models.ChainHealthStat{
+				ChainName:    node.ChainName,
+				HealthyNodes: 0,
+				TotalNodes:   0,
+			}
+		}
+		
+		stat := chainStats[node.ChainName]
+		stat.TotalNodes++
+		if node.Status == "healthy" || node.Status == "degraded" {
+			stat.HealthyNodes++
+			if node.ResponseTimeMs > 0 {
+				stat.AvgResponseTime = (stat.AvgResponseTime*float64(stat.HealthyNodes-1) + float64(node.ResponseTimeMs)) / float64(stat.HealthyNodes)
+			}
+		}
+		stat.Uptime = (stat.Uptime*float64(stat.TotalNodes-1) + node.Uptime) / float64(stat.TotalNodes)
+	}
+	
+	// Calculate average response time
+	avgResponseTime := 0.0
+	if responseTimeCount > 0 {
+		avgResponseTime = float64(totalResponseTime) / float64(responseTimeCount)
+	}
+	
+	// Convert chainStats map to the required format
+	chainStatsMap := make(map[string]models.ChainHealthStat)
+	for chainName, stat := range chainStats {
+		chainStatsMap[chainName] = *stat
+	}
+	
+	return &models.NodeHealthSummary{
+		TotalNodes:       totalNodes,
+		HealthyNodes:     healthyNodes,
+		DegradedNodes:    degradedNodes,
+		UnhealthyNodes:   unhealthyNodes,
+		AvgResponseTime:  avgResponseTime,
+		NodesWithRpcs:    healthData,
+		ChainHealthStats: chainStatsMap,
+		DataAvailability: models.NodeHealthAvailability{
+			HasMinute: true, // We have current data
+			HasHour:   c.hasNodeHealthDataForPeriod(time.Hour),
+			HasDay:    c.hasNodeHealthDataForPeriod(24 * time.Hour),
+			Has7Days:  c.hasNodeHealthDataForPeriod(7 * 24 * time.Hour),
+			Has14Days: c.hasNodeHealthDataForPeriod(14 * 24 * time.Hour),
+			Has30Days: c.hasNodeHealthDataForPeriod(30 * 24 * time.Hour),
+		},
+	}, nil
+}
+
+// hasNodeHealthDataForPeriod checks if we have node health data for a given period
+func (c *EnhancedChartService) hasNodeHealthDataForPeriod(period time.Duration) bool {
+	query := `
+		SELECT COUNT(*) 
+		FROM node_health 
+		WHERE checked_at > ?
+	`
+	
+	cutoff := time.Now().Add(-period).Unix()
+	
+	var count int
+	err := c.db.QueryRow(query, cutoff).Scan(&count)
+	if err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to check node health data availability: %v", err)
+		return false
+	}
+	
+	return count > 0
 } 

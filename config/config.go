@@ -12,6 +12,7 @@ import (
 	"websocket-backend-new/internal/scheduler"
 	"websocket-backend-new/internal/database"
 	"websocket-backend-new/internal/broadcaster"
+	"websocket-backend-new/internal/nodehealth"
 )
 
 // Config holds all application configuration
@@ -24,6 +25,7 @@ type Config struct {
 	Scheduler   scheduler.Config    `json:"scheduler"`
 	Database    database.Config     `json:"database"`
 	Broadcaster broadcaster.Config  `json:"broadcaster"`
+	NodeHealth  nodehealth.Config   `json:"nodeHealth"`
 }
 
 // ServerConfig holds server-specific configuration
@@ -50,6 +52,7 @@ func DefaultConfig() Config {
 		Scheduler:   scheduler.DefaultConfig(),
 		Database:    database.DefaultConfig(),
 		Broadcaster: getDefaultBroadcasterConfig(),
+		NodeHealth:  nodehealth.DefaultConfig(),
 	}
 }
 

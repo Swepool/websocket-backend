@@ -8,6 +8,12 @@ type Chain struct {
 	Testnet          bool   `json:"testnet"`
 	RpcType          string `json:"rpc_type"`
 	AddrPrefix       string `json:"addr_prefix"`
+	Rpcs             []Rpc  `json:"rpcs,omitempty"`
+}
+
+// Rpc represents an RPC endpoint
+type Rpc struct {
+	URL string `json:"url"`
 }
 
 // Native represents native token information (optional, for future use)

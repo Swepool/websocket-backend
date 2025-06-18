@@ -11,6 +11,7 @@ import (
 	"websocket-backend-new/internal/pipeline"
 	"websocket-backend-new/internal/server"
 	"websocket-backend-new/internal/chains"
+	"websocket-backend-new/internal/nodehealth"
 	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
@@ -45,6 +46,9 @@ func main() {
 	// Create chains service first
 	chainsService := chains.NewService(appConfig.Chains)
 	
+	// Create node health service
+	nodeHealthService := nodehealth.NewService(appConfig.NodeHealth)
+	
 	// Create pipeline with configuration and chains service
 	coordinator, err := pipeline.NewCoordinator(appConfig.Pipeline, chainsService)
 	if err != nil {
@@ -58,6 +62,13 @@ func main() {
 		chartService := coordinator.GetChartService()
 		chartService.SetLatencyData(latencyData)
 		utils.LogInfo("MAIN", "Updated chart service with latency data for %d chain pairs", len(latencyData))
+	})
+	
+	// Set up node health callback to store data in chart service
+	nodeHealthService.SetHealthCallback(func(healthData []models.NodeHealthData) {
+		chartService := coordinator.GetChartService()
+		chartService.SetNodeHealthData(healthData)
+		utils.LogInfo("MAIN", "Updated chart service with node health data for %d nodes", len(healthData))
 	})
 	
 	// Create server with coordinator and chains service
@@ -74,6 +85,13 @@ func main() {
 		}
 	}()
 	
+	// Start node health service
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		nodeHealthService.Start(ctx)
+	}()
+		
 	// Start HTTP server
 	wg.Add(1)
 	go func() {

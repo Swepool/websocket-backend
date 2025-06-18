@@ -174,6 +174,23 @@ const (
 		}
 	`
 
+	// New query that includes RPCs for health checking
+	chainsWithRpcsQuery = `
+		query ChainsWithRpcs {
+			v2_chains {
+				universal_chain_id
+				display_name
+				chain_id
+				testnet
+				rpc_type
+				addr_prefix
+				rpcs {
+					url
+				}
+			}
+		}
+	`
+
 	latencyQuery = `
 		query LatencyStats($sourceChainId: String!, $destinationChainId: String!) {
 			v2_stats_latency(args: {
@@ -253,12 +270,17 @@ type RawWrappingChain struct {
 }
 
 type RawChain struct {
-	UniversalChainID string `json:"universal_chain_id"`
-	DisplayName      string `json:"display_name"`
-	ChainID          string `json:"chain_id"`
-	Testnet          bool   `json:"testnet"`
-	RpcType          string `json:"rpc_type"`
-	AddrPrefix       string `json:"addr_prefix"`
+	UniversalChainID string   `json:"universal_chain_id"`
+	DisplayName      string   `json:"display_name"`
+	ChainID          string   `json:"chain_id"`
+	Testnet          bool     `json:"testnet"`
+	RpcType          string   `json:"rpc_type"`
+	AddrPrefix       string   `json:"addr_prefix"`
+	Rpcs             []RawRpc `json:"rpcs,omitempty"`
+}
+
+type RawRpc struct {
+	URL string `json:"url"`
 }
 
 type RawLatency struct {
@@ -327,6 +349,13 @@ func (r RawTransfer) calculateCanonicalTokenSymbol() string {
 
 // Convert raw chain to model
 func (r RawChain) ToModel() models.Chain {
+	rpcs := make([]models.Rpc, len(r.Rpcs))
+	for i, rpc := range r.Rpcs {
+		rpcs[i] = models.Rpc{
+			URL: rpc.URL,
+		}
+	}
+	
 	return models.Chain{
 		UniversalChainID: r.UniversalChainID,
 		ChainID:          r.ChainID,
@@ -334,6 +363,7 @@ func (r RawChain) ToModel() models.Chain {
 		Testnet:          r.Testnet,
 		RpcType:          r.RpcType,
 		AddrPrefix:       r.AddrPrefix,
+		Rpcs:             rpcs,
 	}
 }
 
@@ -383,6 +413,22 @@ func (c *Client) FetchNewTransfers(ctx context.Context, lastSortOrder string, li
 // FetchChains fetches all available chains
 func (c *Client) FetchChains(ctx context.Context) ([]models.Chain, error) {
 	result, err := c.executeQuery(ctx, chainsQuery, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Convert raw chains to models
+	chains := make([]models.Chain, len(result.Data.V2Chains))
+	for i, raw := range result.Data.V2Chains {
+		chains[i] = raw.ToModel()
+	}
+	
+	return chains, nil
+}
+
+// FetchChainsWithRpcs fetches all available chains including their RPC URLs for health checking
+func (c *Client) FetchChainsWithRpcs(ctx context.Context) ([]models.Chain, error) {
+	result, err := c.executeQuery(ctx, chainsWithRpcsQuery, nil)
 	if err != nil {
 		return nil, err
 	}

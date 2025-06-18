@@ -1,13 +1,12 @@
 <script lang="ts">
-  // Waterfall latency chart - shows sequential IBC packet latency stages
+  // Latency waterfall chart with box plots
   
   let { latencyData = [] } = $props()
   
-  // State management for filtering
-  let selectedSource = $state("all")
-  let selectedDestination = $state("all")
+  let selectedSource = $state("")
+  let selectedDestination = $state("")
   
-  // Computed values - Extract unique chains
+  // Extract unique chains for filters
   const allSources = $derived(latencyData && latencyData.length > 0
     ? [...new Set(latencyData.map(item => item.sourceName).filter(Boolean))].sort()
     : [])
@@ -16,6 +15,18 @@
     ? [...new Set(latencyData.map(item => item.destinationName).filter(Boolean))].sort()
     : [])
   
+  // Filter destinations based on selected source
+  const availableDestinations = $derived(
+    !latencyData || latencyData.length === 0 ? [] :
+    !selectedSource ? allDestinations :
+    [...new Set(
+      latencyData
+        .filter(item => item.sourceName === selectedSource)
+        .map(item => item.destinationName)
+        .filter(Boolean)
+    )].sort()
+  )
+  
   const currentData = $derived(latencyData && latencyData.length > 0 
     ? latencyData
         .filter(item => 
@@ -23,84 +34,73 @@
           item.packetRecv.median !== undefined && 
           item.writeAck.median !== undefined && 
           item.packetAck.median !== undefined)
-        .filter(item => selectedSource === "all" || item.sourceName === selectedSource)
-        .filter(item => selectedDestination === "all" || item.destinationName === selectedDestination)
+        .filter(item => !selectedSource || item.sourceName === selectedSource)
+        .filter(item => !selectedDestination || item.destinationName === selectedDestination)
         .map(item => {
-          // The raw data represents cumulative times from start
-          // packetRecv: time until packet received  
-          // writeAck: time until write acknowledgment (cumulative)
-          // packetAck: time until packet acknowledgment (total end-to-end time)
-          
-          const totalLatency = {
-            p5: item.packetAck.p5,
-            median: item.packetAck.median,
-            p95: item.packetAck.p95
-          }
-          
-          // Calculate actual stage durations from medians (only medians can be subtracted)
-          const stageDurations = {
-            packetRecv: {
-              duration: item.packetRecv.median,
-              label: "Packet Recv",
-              color: "bg-blue-600"
+          const eventTypes = [
+            {
+              key: 'packetRecv',
+              label: 'Packet Recv',
+              color: 'bg-blue-600',
+              shortLabel: 'recv',
+              p5: item.packetRecv.p5,
+              median: item.packetRecv.median,
+              p95: item.packetRecv.p95
             },
-            writeAck: {
-              duration: Math.max(0, item.writeAck.median - item.packetRecv.median),
-              label: "Write Ack", 
-              color: "bg-yellow-600"
+            {
+              key: 'writeAck',
+              label: 'Write Ack',
+              color: 'bg-yellow-600', 
+              shortLabel: 'write',
+              p5: item.writeAck.p5,
+              median: item.writeAck.median,
+              p95: item.writeAck.p95
             },
-            packetAck: {
-              duration: Math.max(0, item.packetAck.median - item.writeAck.median),
-              label: "Packet Ack",
-              color: "bg-green-600"
+            {
+              key: 'packetAck',
+              label: 'Packet Ack',
+              color: 'bg-green-600',
+              shortLabel: 'ack',
+              p5: item.packetAck.p5,
+              median: item.packetAck.median,
+              p95: item.packetAck.p95
             }
-          }
-          
-          // Calculate cumulative positions for waterfall
-          let cumulativeTime = 0
-          const waterfallStages = Object.entries(stageDurations).map(([key, stage]) => {
-            const startTime = cumulativeTime
-            cumulativeTime += stage.duration
-            return {
-              key,
-              ...stage,
-              startTime,
-              endTime: cumulativeTime
-            }
-          })
-          
-          // Debug log for zero durations
-          if (stageDurations.writeAck.duration === 0) {
-            console.log(`⚠️ Zero writeAck duration for ${item.sourceName} → ${item.destinationName}`)
-          }
+          ]
           
           return {
             ...item,
-            totalLatency,
-            stageDurations,
-            waterfallStages
+            eventTypes
           }
         })
-        .sort((a, b) => a.totalLatency.median - b.totalLatency.median) // Sort by total median latency
-        .slice(0, 12) // Show top 12 for good visibility
+        .sort((a, b) => a.packetAck.median - b.packetAck.median)
+        .slice(0, !selectedSource && !selectedDestination ? 4 : 12)
     : [])
   
   const hasData = $derived(currentData.length > 0)
   const isLoading = $derived(!hasData && (!latencyData || latencyData.length === 0))
   
-  // Calculate scale for waterfall chart
-  const dataMaxLatency = $derived(currentData.length > 0 ? Math.max(...currentData.map(item => item.totalLatency.p95)) : 100)
-  const dataMinLatency = $derived(0) // Start from 0 for waterfall
+  // Calculate global scale across all visible routes for consistent scrubbing
+  const globalScale = $derived(
+    !currentData || currentData.length === 0 ? { min: 0, max: 1 } : (() => {
+      const allValues = currentData.flatMap(item => [
+        item.packetRecv.p5, item.packetRecv.median, item.packetRecv.p95,
+        item.writeAck.p5, item.writeAck.median, item.writeAck.p95,
+        item.packetAck.p5, item.packetAck.median, item.packetAck.p95
+      ]).filter(v => v != null && !isNaN(v))
+      
+      if (allValues.length === 0) return { min: 0, max: 1 }
+      
+      const maxValue = Math.max(...allValues)
+      const minValue = Math.min(...allValues)
+      const padding = Math.max((maxValue - minValue) * 0.05, maxValue * 0.01)
+      
+      return {
+        min: Math.max(0, minValue - padding),
+        max: maxValue + padding
+      }
+    })()
+  )
   
-  // Add padding and use nice bounds
-  const minLatency = $derived(0)
-  const maxLatency = $derived(dataMaxLatency * 1.1) // 10% padding above
-  
-  const sqrtMaxLatency = $derived(Math.sqrt(maxLatency))
-  const sqrtMinLatency = $derived(Math.sqrt(minLatency))
-  const sqrtLatencyRange = $derived(sqrtMaxLatency - sqrtMinLatency || 1)
-  
-  // Utility functions
   function formatLatency(seconds) {
     if (seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`
     if (seconds < 10) return `${seconds.toFixed(1)}s`
@@ -118,11 +118,42 @@
     return ((value - minValue) / range) * 100
   }
   
-  // Calculate positions for total latency visualization (P5, median, P95 only)
-  function getTotalLatencyPositions(totalLatency, routeScale) {
-    const p5Pos = getPosition(totalLatency.p5, routeScale.min, routeScale.max)
-    const medianPos = getPosition(totalLatency.median, routeScale.min, routeScale.max)
-    const p95Pos = getPosition(totalLatency.p95, routeScale.min, routeScale.max)
+  function getRouteScale(item) {
+    // Get all values for this route to find true min/max range
+    const allValues = [
+      item.packetRecv.p5, item.packetRecv.median, item.packetRecv.p95,
+      item.writeAck.p5, item.writeAck.median, item.writeAck.p95,
+      item.packetAck.p5, item.packetAck.median, item.packetAck.p95
+    ].filter(v => v != null && !isNaN(v))
+    
+    const minValue = Math.min(...allValues)
+    const maxValue = Math.max(...allValues)
+    
+    return {
+      min: minValue,
+      max: maxValue
+    }
+  }
+  
+  function getSqrtPosition(value, minValue, maxValue) {
+    if (maxValue <= minValue) return 0
+    const normalizedValue = Math.max(0, value - minValue)
+    const normalizedMax = maxValue - minValue
+    return (Math.sqrt(normalizedValue) / Math.sqrt(normalizedMax)) * 100
+  }
+  
+  function getTimeFromSqrtPosition(position, minValue, maxValue) {
+    if (maxValue <= minValue || isNaN(maxValue) || isNaN(minValue)) return minValue || 0
+    const normalizedMax = maxValue - minValue
+    const normalizedPosition = Math.max(0, Math.min(1, position / 100))
+    const timeValue = (normalizedPosition * normalizedPosition) * normalizedMax + minValue
+    return isNaN(timeValue) ? minValue : timeValue
+  }
+  
+  function getEventPositions(eventType, routeScale) {
+    const p5Pos = getSqrtPosition(eventType.p5, routeScale.min, routeScale.max)
+    const medianPos = getSqrtPosition(eventType.median, routeScale.min, routeScale.max)
+    const p95Pos = getSqrtPosition(eventType.p95, routeScale.min, routeScale.max)
     
     return {
       p5Pos,
@@ -131,40 +162,34 @@
     }
   }
   
-  // Per-route scale - from 0 to total latency max
-  function getRouteScale(item) {
-    const maxValue = item.totalLatency.p95
-    const padding = maxValue * 0.05
-    
-    return {
-      min: 0,
-      max: maxValue + padding
-    }
-  }
-  
-  // Per-route scrubber state
   let hoveredRoute = $state(-1)
   let scrubberX = $state(0)
+  let scrubberY = $state(0)
   let scrubberTime = $state(0)
-  let scrubberOffsetX = $state(0) // Track offset position for accurate alignment
+  let scrubberOffsetX = $state(0)
   
-  function handleMouseMove(event, routeScale, routeIndex) {
+  // Reset destination when source changes and current destination is no longer available
+  $effect(() => {
+    if (selectedDestination && !availableDestinations.includes(selectedDestination)) {
+      selectedDestination = ""
+    }
+  })
+  
+  function handleMouseMove(event, routeIndex) {
     const rect = event.currentTarget.getBoundingClientRect()
     const x = event.clientX - rect.left
-    const percentage = (x / rect.width) * 100
-    const time = routeScale.min + ((percentage / 100) * (routeScale.max - routeScale.min))
+    const y = event.clientY - rect.top
+    const percentage = Math.max(0, Math.min(100, (x / rect.width) * 100))
     
-    // Calculate the offset position within the full stage container
-    // We need to account for the stage label width and gap
-    const stageContainer = event.currentTarget.parentElement
-    const stageRect = stageContainer.getBoundingClientRect()
-    const chartOffsetX = rect.left - stageRect.left
-    const scrubberPixelPos = chartOffsetX + x
-    const scrubberContainerPercentage = (scrubberPixelPos / stageRect.width) * 100
+    // Use the same route scale that's used for visual positioning
+    const item = currentData[routeIndex]
+    const routeScale = getRouteScale(item)
+    const time = getTimeFromSqrtPosition(percentage, routeScale.min, routeScale.max)
     
     hoveredRoute = routeIndex
-    scrubberX = percentage // Keep this for the time calculation
-    scrubberOffsetX = scrubberContainerPercentage // Use this for positioning
+    scrubberX = percentage
+    scrubberY = y
+    scrubberOffsetX = percentage
     scrubberTime = time
   }
   
@@ -175,16 +200,15 @@
 
 <div class="h-full p-0 bg-zinc-950 border border-zinc-800">
 <div class="flex flex-col h-full font-mono">
-  <!-- Terminal Header -->
   <header class="flex items-center justify-between p-2 border-b border-zinc-800">
     <div class="flex items-center space-x-2">
       <span class="text-zinc-500 text-xs">$</span>
-      <h3 class="text-xs text-zinc-300 font-semibold">latency-waterfall</h3>
-      <span class="text-zinc-600 text-xs">--stages=all</span>
-      {#if selectedSource !== "all"}
+      <h3 class="text-xs text-zinc-300 font-semibold">latency-boxplots</h3>
+      <span class="text-zinc-600 text-xs">--events=recv,write,ack</span>
+      {#if selectedSource}
         <span class="text-zinc-600 text-xs">--source={formatChainName(selectedSource)}</span>
       {/if}
-      {#if selectedDestination !== "all"}
+      {#if selectedDestination}
         <span class="text-zinc-600 text-xs">--dest={formatChainName(selectedDestination)}</span>
       {/if}
     </div>
@@ -197,66 +221,38 @@
     </div>
   </header>
 
-  <!-- Controls -->
   <div class="pt-2 px-2">
-    <!-- Chart Guide -->
-    <div class="mb-3 p-2 bg-zinc-900 border border-zinc-800">
-      <div class="text-xs text-zinc-400 mb-2 font-mono">waterfall chart elements:</div>
-      <div class="flex items-center justify-between gap-6 text-[10px] text-zinc-500">
-        <div class="flex items-center gap-1">
-          <div class="relative w-6 h-3">
-            <div class="absolute w-6 h-0.5 top-1.5 bg-zinc-500"></div>
-            <div class="absolute w-0.5 h-1 left-0 top-1 bg-zinc-500"></div>
-            <div class="absolute w-0.5 h-1 right-0 top-1 bg-zinc-500"></div>
-          </div>
-          <span>total range<br/>(P5-P95)</span>
-        </div>
-        <div class="flex items-center gap-1">
-          <div class="w-0.5 h-3 bg-white"></div>
-          <span>median<br/>(center)</span>
-        </div>
-        <div class="flex items-center gap-1">
-          <div class="w-6 h-2 bg-blue-600"></div>
-          <span>stage bars<br/>(durations)</span>
-        </div>
-      </div>
-    </div>
-    
-    <!-- Filters -->
     <div class="flex flex-col sm:flex-row gap-2 mb-2">
-      <!-- Source Filter -->
       <div class="flex items-center gap-1">
         <span class="text-zinc-600 text-xs font-mono">source:</span>
         <select 
           bind:value={selectedSource}
           class="px-2 py-1 text-xs font-mono bg-zinc-900 border border-zinc-700 text-zinc-300 hover:border-zinc-600 focus:border-zinc-500 focus:outline-none transition-colors"
         >
-          <option value="all">all</option>
+          <option value="">select</option>
           {#each allSources as source}
             <option value={source}>{formatChainName(source)}</option>
           {/each}
         </select>
       </div>
       
-      <!-- Destination Filter -->
       <div class="flex items-center gap-1">
         <span class="text-zinc-600 text-xs font-mono">destination:</span>
         <select 
           bind:value={selectedDestination}
           class="px-2 py-1 text-xs font-mono bg-zinc-900 border border-zinc-700 text-zinc-300 hover:border-zinc-600 focus:border-zinc-500 focus:outline-none transition-colors"
         >
-          <option value="all">all</option>
-          {#each allDestinations as destination}
+          <option value="">select</option>
+          {#each availableDestinations as destination}
             <option value={destination}>{formatChainName(destination)}</option>
           {/each}
         </select>
       </div>
       
-      <!-- Clear Filters -->
-      {#if selectedSource !== "all" || selectedDestination !== "all"}
+      {#if selectedSource || selectedDestination}
         <button
           class="px-2 py-1 text-xs font-mono border border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300 transition-colors"
-          on:click={() => { selectedSource = "all"; selectedDestination = "all"; }}
+          on:click={() => { selectedSource = ""; selectedDestination = ""; }}
           title="Clear all filters"
         >
           clear
@@ -264,44 +260,21 @@
       {/if}
     </div>
     
-    <!-- Legend -->
-    <div class="flex items-center gap-4 text-xs text-zinc-500 mb-1">
-      <div class="flex items-center gap-1">
-        <div class="relative w-5 h-4">
-          <div class="absolute w-5 h-0.5 top-2 bg-zinc-500"></div>
-          <div class="absolute w-0.5 h-4 left-2.5 bg-white"></div>
-        </div>
-        <span>Total Latency</span>
-      </div>
-      <div class="flex items-center gap-1">
-        <div class="w-4 h-2 bg-blue-600 border border-zinc-500"></div>
-        <span>Packet Recv</span>
-      </div>
-      <div class="flex items-center gap-1">
-        <div class="w-4 h-2 bg-yellow-600 border border-zinc-500"></div>
-        <span>Write Ack</span>
-      </div>
-      <div class="flex items-center gap-1">
-        <div class="w-4 h-2 bg-green-600 border border-zinc-500"></div>
-        <span>Packet Ack</span>
-      </div>
-    </div>
+
   </div>
 
-  <!-- Waterfall Chart -->
   <main class="flex-1 flex flex-col p-2 min-h-0">
     <div class="text-xs text-zinc-500 font-mono font-medium mb-2">
-      waterfall_latency: {currentData.length} routes
-      {#if selectedSource !== "all" || selectedDestination !== "all"}
+      event_latency: {currentData.length} routes
+      {#if selectedSource || selectedDestination}
         <span class="text-zinc-600">
-          (filtered from {latencyData?.length || 0} total)
+          (filtered from {latencyData?.length || 0})
         </span>
       {/if}
     </div>
 
     <div class="flex-1 overflow-y-auto">
       {#if isLoading}
-        <!-- Loading State -->
         <div class="space-y-3">
           {#each Array(8) as _, index}
             <div class="flex items-center gap-3">
@@ -311,7 +284,6 @@
           {/each}
         </div>
       {:else if !hasData}
-        <!-- No Data State -->
         <div class="flex-1 flex items-center justify-center">
           <div class="text-center">
             <div class="text-zinc-600 font-mono">no_latency_data</div>
@@ -319,243 +291,165 @@
           </div>
         </div>
       {:else}
-        <!-- Waterfall Data -->
-        <div class="space-y-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4">
           {#each currentData as item, index}
-            {@const routeScale = getRouteScale(item)}
-            {@const totalLatencyPositions = getTotalLatencyPositions(item.totalLatency, routeScale)}
-            
-            <!-- Mobile: Stacked Layout -->
             <div class="flex flex-col sm:hidden group mb-4">
-              <!-- Route Header -->
               <div class="flex justify-between items-start mb-2">
                 <div class="text-xs text-zinc-300 truncate flex-shrink-0">
                   <div class="font-medium">
-                    {formatChainName(item.sourceName)}
-                  </div>
-                  <div class="text-zinc-500 text-[10px]">
-                    → {formatChainName(item.destinationName)}
-                  </div>
-                </div>
-                
-                <div class="text-xs text-zinc-400 flex-shrink-0 tabular-nums text-right">
-                  <div class="font-medium">
-                    {formatLatency(item.totalLatency.median)}
-                  </div>
-                  <div class="text-[10px] text-zinc-600">
-                    {formatLatency(item.totalLatency.p5)}-{formatLatency(item.totalLatency.p95)}
+                    {formatChainName(item.sourceName)} → {formatChainName(item.destinationName)}
                   </div>
                 </div>
               </div>
               
-              <!-- Total Latency Box Plot -->
-              <div class="mb-2">
-                <div class="flex items-center gap-2">
-                  <div class="w-12 text-[10px] text-zinc-500 font-mono">total</div>
-                  <div 
-                    class="flex-1 relative h-8 bg-zinc-900 border border-zinc-800 cursor-crosshair"
-                    on:mousemove={(e) => handleMouseMove(e, routeScale, index)}
-                    on:mouseleave={handleMouseLeave}
-                  >
-                    <!-- Whisker Line (P5 to P95) -->
-                    <div 
-                      class="absolute h-0.5 top-4 bg-zinc-500"
-                      style="
-                        left: {totalLatencyPositions.p5Pos}%; 
-                        width: {Math.max(0.5, totalLatencyPositions.p95Pos - totalLatencyPositions.p5Pos).toFixed(1)}%;
-                      "
-                    ></div>
-                    
-                    <!-- Median Line -->
-                    <div 
-                      class="absolute w-0.5 h-6 top-1 bg-white z-10"
-                      style="left: {totalLatencyPositions.medianPos}%"
-                      title="Total Latency Median: {formatLatency(item.totalLatency.median)}"
-                    ></div>
-                    
-                    <!-- P5 Cap -->
-                    <div 
-                      class="absolute w-0.5 h-2 top-3 bg-zinc-500"
-                      style="left: {totalLatencyPositions.p5Pos}%"
-                      title="P5: {formatLatency(item.totalLatency.p5)}"
-                    ></div>
-                    
-                    <!-- P95 Cap -->
-                    <div 
-                      class="absolute w-0.5 h-2 top-3 bg-zinc-500"
-                      style="left: {totalLatencyPositions.p95Pos}%"
-                      title="P95: {formatLatency(item.totalLatency.p95)}"
-                    ></div>
-                  </div>
-                  <div class="w-12 text-[10px] text-zinc-400 tabular-nums text-right">
-                    {formatLatency(item.totalLatency.median)}
-                  </div>
-                </div>
-              </div>
-
-              <!-- Waterfall Stage Duration Bars -->
-              <div class="space-y-1 relative">
-                <!-- Hover Scrubber -->
-                {#if hoveredRoute === index}
-                  <div 
-                    class="absolute top-0 bottom-0 w-0.5 bg-white opacity-80 z-20 pointer-events-none"
-                    style="left: {scrubberOffsetX}%"
-                  ></div>
-                  <div 
-                    class="absolute top-0 left-0 bg-zinc-900 border border-zinc-700 px-2 py-1 text-[10px] text-white font-mono z-30 pointer-events-none"
-                    style="left: {Math.min(scrubberOffsetX, 80)}%; transform: translateX(-50%)"
-                  >
-                    {formatLatency(scrubberTime)}
-                  </div>
-                {/if}
-                
-                {#each item.waterfallStages as stage}
-                  <div class="flex items-center gap-2">
-                    <div class="w-12 text-[10px] text-zinc-500 font-mono">
-                      {stage.key === 'packetRecv' ? 'recv' : stage.key === 'writeAck' ? 'write' : 'ack'}
-                    </div>
-                    <div 
-                      class="flex-1 relative h-6 bg-zinc-900 border border-zinc-800 cursor-crosshair"
-                      on:mousemove={(e) => handleMouseMove(e, routeScale, index)}
-                      on:mouseleave={handleMouseLeave}
-                    >
-                      {#if stage.duration > 0}
-                        <!-- Duration Bar -->
-                        <div 
-                          class="absolute h-4 top-1 {stage.color} border border-zinc-500"
-                          style="
-                            left: {getPosition(stage.startTime, routeScale.min, routeScale.max).toFixed(1)}%; 
-                            width: {Math.max(1, getPosition(stage.endTime, routeScale.min, routeScale.max) - getPosition(stage.startTime, routeScale.min, routeScale.max)).toFixed(1)}%;
-                          "
-                          title="{stage.label}: {formatLatency(stage.duration)}"
-                        ></div>
-                      {:else}
-                        <!-- Zero duration - show as thin line -->
-                        <div 
-                          class="absolute w-0.5 h-4 top-1 bg-zinc-400 opacity-60"
-                          style="left: {getPosition(stage.startTime, routeScale.min, routeScale.max).toFixed(1)}%"
-                          title="{stage.label}: instant (0.0s)"
-                        ></div>
-                      {/if}
-                    </div>
-                    <div class="w-12 text-[10px] text-zinc-400 tabular-nums text-right">
-                      {stage.duration > 0 ? formatLatency(stage.duration) : '0.0s'}
-                    </div>
+              <div class="grid grid-cols-3 gap-1 mb-2">
+                {#each item.eventTypes as eventType}
+                  <div class="bg-zinc-800 border border-zinc-700 p-2 text-center">
+                    <div class="text-[8px] text-zinc-500 font-mono mb-1">{eventType.shortLabel}</div>
+                    <div class="text-[8px] text-zinc-400 font-mono">P5: {formatLatency(eventType.p5)}</div>
+                    <div class="text-[8px] text-blue-300 font-mono font-medium">Med: {formatLatency(eventType.median)}</div>
+                    <div class="text-[8px] text-zinc-400 font-mono">P95: {formatLatency(eventType.p95)}</div>
                   </div>
                 {/each}
               </div>
+              
+              <div 
+                class="space-y-1 relative bg-zinc-900 border border-zinc-800 p-2"
+              >
+                <div 
+                  class="relative w-full h-full"
+                  on:mousemove={(e) => handleMouseMove(e, index)}
+                  on:mouseleave={handleMouseLeave}
+                >
+                  {#if hoveredRoute === index}
+                    <div 
+                      class="absolute top-0 bottom-0 w-0.5 bg-zinc-400 z-20 pointer-events-none"
+                      style="left: {scrubberX}%"
+                    ></div>
+                    <div 
+                      class="absolute bg-zinc-800 border border-zinc-600 px-1 py-0.5 text-[8px] text-zinc-300 font-mono z-30 pointer-events-none"
+                      style="left: {scrubberX}%; top: {scrubberY - 25}px; transform: translateX({scrubberX < 25 ? '0%' : scrubberX > 75 ? '-100%' : '-50%'})"
+                    >
+                      {formatLatency(scrubberTime)}
+                    </div>
+                  {/if}
+                
+                  {#each item.eventTypes as eventType}
+                  {@const routeScale = getRouteScale(item)}
+                  {@const positions = getEventPositions(eventType, routeScale)}
+                  <div class="flex items-center">
+                    <div 
+                      class="w-full relative h-6"
+                    >
+                      <div 
+                        class="absolute h-0.5 bg-zinc-500"
+                        style="
+                          left: {positions.p5Pos}%; 
+                          width: {Math.max(0.5, positions.p95Pos - positions.p5Pos).toFixed(1)}%;
+                          top: 11.5px;
+                        "
+                      ></div>
+                      
+                      <div 
+                        class="absolute w-0.5 h-4 top-1 bg-blue-400 z-10"
+                        style="left: {positions.medianPos}%"
+                        title="{eventType.label} Median: {formatLatency(eventType.median)}"
+                      ></div>
+                      
+                      <div 
+                        class="absolute w-0.5 h-3 top-1.5 bg-zinc-500"
+                        style="left: {positions.p5Pos}%"
+                        title="P5: {formatLatency(eventType.p5)}"
+                      ></div>
+                      
+                      <div 
+                        class="absolute w-0.5 h-3 top-1.5 bg-zinc-500"
+                        style="left: {positions.p95Pos}%"
+                        title="P95: {formatLatency(eventType.p95)}"
+                      ></div>
+                    </div>
+                  </div>
+                {/each}
+                </div>
+              </div>
             </div>
 
-            <!-- Desktop: Waterfall Layout -->
             <div class="hidden sm:block group mb-6">
-              <!-- Route Header -->
               <div class="flex items-center justify-between mb-2">
                 <div class="text-xs text-zinc-300 font-medium">
                   {formatChainName(item.sourceName)} → {formatChainName(item.destinationName)}
                 </div>
-                <div class="text-xs text-zinc-400 tabular-nums">
-                  <span class="font-medium">{formatLatency(item.totalLatency.median)}</span>
-                  <span class="text-zinc-600 ml-1">
-                    ({formatLatency(item.totalLatency.p5)}-{formatLatency(item.totalLatency.p95)})
-                  </span>
-                </div>
               </div>
               
-              <!-- Total Latency Box Plot -->
-              <div class="mb-2">
-                <div class="flex items-center gap-3">
-                  <div class="w-16 text-xs text-zinc-500 font-mono">total</div>
-                  <div 
-                    class="flex-1 relative h-8 bg-zinc-900 border border-zinc-800 cursor-crosshair group-hover:border-zinc-600 transition-colors"
-                    on:mousemove={(e) => handleMouseMove(e, routeScale, index)}
-                    on:mouseleave={handleMouseLeave}
-                  >
-                    <!-- Whisker Line (P5 to P95) -->
-                    <div 
-                      class="absolute h-0.5 top-4 bg-zinc-500"
-                      style="
-                        left: {totalLatencyPositions.p5Pos}%; 
-                        width: {Math.max(0.5, totalLatencyPositions.p95Pos - totalLatencyPositions.p5Pos).toFixed(1)}%;
-                      "
-                    ></div>
-                    
-                    <!-- Median Line -->
-                    <div 
-                      class="absolute w-0.5 h-6 top-1 bg-white z-10"
-                      style="left: {totalLatencyPositions.medianPos}%"
-                      title="Total Latency Median: {formatLatency(item.totalLatency.median)}"
-                    ></div>
-                    
-                    <!-- P5 Cap -->
-                    <div 
-                      class="absolute w-0.5 h-2 top-3 bg-zinc-500"
-                      style="left: {totalLatencyPositions.p5Pos}%"
-                      title="P5: {formatLatency(item.totalLatency.p5)}"
-                    ></div>
-                    
-                    <!-- P95 Cap -->
-                    <div 
-                      class="absolute w-0.5 h-2 top-3 bg-zinc-500"
-                      style="left: {totalLatencyPositions.p95Pos}%"
-                      title="P95: {formatLatency(item.totalLatency.p95)}"
-                    ></div>
+              <div class="grid grid-cols-3 gap-2 mb-2">
+                {#each item.eventTypes as eventType}
+                  <div class="bg-zinc-800 border border-zinc-700 p-2 text-center">
+                    <div class="text-xs text-zinc-500 font-mono mb-1">{eventType.shortLabel}</div>
+                    <div class="text-[10px] text-zinc-400 font-mono">P5: {formatLatency(eventType.p5)}</div>
+                    <div class="text-[10px] text-blue-300 font-mono font-medium">Med: {formatLatency(eventType.median)}</div>
+                    <div class="text-[10px] text-zinc-400 font-mono">P95: {formatLatency(eventType.p95)}</div>
                   </div>
-                  <div class="w-16 text-xs text-zinc-400 tabular-nums text-right">
-                    {formatLatency(item.totalLatency.median)}
-                  </div>
-                </div>
+                {/each}
               </div>
-
-              <!-- Waterfall Stage Duration Bars -->
-              <div class="space-y-1 relative">
-                <!-- Hover Scrubber -->
-                {#if hoveredRoute === index}
-                  <div 
-                    class="absolute top-0 bottom-0 w-0.5 bg-white opacity-80 z-20 pointer-events-none"
-                    style="left: {scrubberOffsetX}%"
-                  ></div>
-                  <div 
-                    class="absolute top-0 left-0 bg-zinc-900 border border-zinc-700 px-2 py-1 text-[10px] text-white font-mono z-30 pointer-events-none"
-                    style="left: {Math.min(scrubberOffsetX, 80)}%; transform: translateX(-50%)"
-                  >
-                    {formatLatency(scrubberTime)}
-                  </div>
-                {/if}
-                
-                {#each item.waterfallStages as stage}
-                  <div class="flex items-center gap-3">
-                    <div class="w-16 text-xs text-zinc-500 font-mono">
-                      {stage.key === 'packetRecv' ? 'recv' : stage.key === 'writeAck' ? 'write' : 'ack'}
-                    </div>
+              
+              <div 
+                class="space-y-1 relative bg-zinc-900 border border-zinc-800 p-2"
+              >
+                <div 
+                  class="relative w-full h-full"
+                  on:mousemove={(e) => handleMouseMove(e, index)}
+                  on:mouseleave={handleMouseLeave}
+                >
+                  {#if hoveredRoute === index}
                     <div 
-                      class="flex-1 relative h-6 bg-zinc-900 border border-zinc-800 cursor-crosshair"
-                      on:mousemove={(e) => handleMouseMove(e, routeScale, index)}
-                      on:mouseleave={handleMouseLeave}
+                      class="absolute top-0 bottom-0 w-0.5 bg-zinc-400 z-20 pointer-events-none"
+                      style="left: {scrubberX}%"
+                    ></div>
+                    <div 
+                      class="absolute bg-zinc-800 border border-zinc-600 px-1 py-0.5 text-xs text-zinc-300 font-mono z-30 pointer-events-none"
+                      style="left: {scrubberX}%; top: {scrubberY - 25}px; transform: translateX({scrubberX < 25 ? '0%' : scrubberX > 75 ? '-100%' : '-50%'})"
                     >
-                      {#if stage.duration > 0}
-                        <!-- Duration Bar -->
-                        <div 
-                          class="absolute h-4 top-1 {stage.color} border border-zinc-500"
-                          style="
-                            left: {getPosition(stage.startTime, routeScale.min, routeScale.max).toFixed(1)}%; 
-                            width: {Math.max(1, getPosition(stage.endTime, routeScale.min, routeScale.max) - getPosition(stage.startTime, routeScale.min, routeScale.max)).toFixed(1)}%;
-                          "
-                          title="{stage.label}: {formatLatency(stage.duration)}"
-                        ></div>
-                      {:else}
-                        <!-- Zero duration - show as thin line -->
-                        <div 
-                          class="absolute w-0.5 h-4 top-1 bg-zinc-400 opacity-60"
-                          style="left: {getPosition(stage.startTime, routeScale.min, routeScale.max).toFixed(1)}%"
-                          title="{stage.label}: instant (0.0s)"
-                        ></div>
-                      {/if}
+                      {formatLatency(scrubberTime)}
                     </div>
-                    <div class="w-16 text-xs text-zinc-400 tabular-nums text-right">
-                      {stage.duration > 0 ? formatLatency(stage.duration) : '0.0s'}
+                  {/if}
+                
+                  {#each item.eventTypes as eventType}
+                  {@const routeScale = getRouteScale(item)}
+                  {@const positions = getEventPositions(eventType, routeScale)}
+                  <div class="flex items-center">
+                    <div 
+                      class="w-full relative h-6"
+                    >
+                      <div 
+                        class="absolute h-0.5 bg-zinc-500"
+                        style="
+                          left: {positions.p5Pos}%; 
+                          width: {Math.max(0.5, positions.p95Pos - positions.p5Pos).toFixed(1)}%;
+                          top: 11.5px;
+                        "
+                      ></div>
+                      
+                      <div 
+                        class="absolute w-0.5 h-4 top-1 bg-blue-400 z-10"
+                        style="left: {positions.medianPos}%"
+                        title="{eventType.label} Median: {formatLatency(eventType.median)}"
+                      ></div>
+                      
+                      <div 
+                        class="absolute w-0.5 h-3 top-1.5 bg-zinc-500"
+                        style="left: {positions.p5Pos}%"
+                        title="P5: {formatLatency(eventType.p5)}"
+                      ></div>
+                      
+                      <div 
+                        class="absolute w-0.5 h-3 top-1.5 bg-zinc-500"
+                        style="left: {positions.p95Pos}%"
+                        title="P95: {formatLatency(eventType.p95)}"
+                      ></div>
                     </div>
                   </div>
                 {/each}
+                </div>
               </div>
             </div>
           {/each}
@@ -585,5 +479,3 @@ border-radius: 2px;
 background: #71717a;
 }
 </style>
-  
-  
