@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strconv"
 	"websocket-backend-new/internal/channels"
 	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
@@ -32,21 +34,59 @@ type Config struct {
 
 // DefaultConfig returns default database configuration (PostgreSQL)
 func DefaultConfig() Config {
+	// Read from environment variables with fallbacks
+	host := os.Getenv("DB_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	
+	port := 5432
+	if portStr := os.Getenv("DB_PORT"); portStr != "" {
+		if parsed, err := strconv.Atoi(portStr); err == nil {
+			port = parsed
+		}
+	}
+	
+	user := os.Getenv("DB_USER")
+	if user == "" {
+		user = "websocket_backend"
+	}
+	
+	password := os.Getenv("DB_PASSWORD")
+	if password == "" {
+		password = "websocket_backend_password"
+	}
+	
+	database := os.Getenv("DB_NAME")
+	if database == "" {
+		database = "websocket_backend"
+	}
+	
+	sslMode := os.Getenv("DB_SSLMODE")
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+	
+	dbType := os.Getenv("DB_TYPE")
+	if dbType == "" {
+		dbType = "postgresql" // Default to PostgreSQL for new installations
+	}
+	
 	return Config{
-		// PostgreSQL defaults
-		Host:     "localhost",
-		Port:     5432,
-		User:     "websocket_backend",
-		Password: "websocket_backend_password",
-		Database: "websocket_backend",
-		SSLMode:  "disable",
+		// PostgreSQL configuration (from environment)
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		Database: database,
+		SSLMode:  sslMode,
 		
 		// Legacy SQLite3 fallback
 		DatabasePath: "./websocket_backend.db",
 		
 		// Common
 		BatchSize:    1000, // Larger batch size for PostgreSQL
-		DatabaseType: "postgresql",
+		DatabaseType: dbType,
 	}
 }
 

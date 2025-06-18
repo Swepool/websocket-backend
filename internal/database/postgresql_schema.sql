@@ -1,8 +1,10 @@
 -- PostgreSQL Migration Schema for WebSocket Backend
 -- Optimized for 5.5M+ records with real-time analytics
+-- FIXED VERSION: Creates tables FIRST, then indexes, then materialized views
 
--- Enable required extensions
-CREATE EXTENSION IF NOT EXISTS pg_cron;
+-- =======================
+-- 1. CREATE TABLES FIRST
+-- =======================
 
 -- Main transfers table (optimized for analytics)
 CREATE TABLE IF NOT EXISTS transfers (
@@ -22,34 +24,86 @@ CREATE TABLE IF NOT EXISTS transfers (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Analytical indexes (CRITICAL for performance on 5.5M+ records)
--- BRIN index for timestamp (perfect for time-series data, much smaller than B-tree)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_timestamp_brin ON transfers USING BRIN (timestamp);
+-- Latency data (unchanged structure, but with PostgreSQL optimizations)
+CREATE TABLE IF NOT EXISTS latency_data (
+    id BIGSERIAL PRIMARY KEY,
+    source_chain TEXT NOT NULL,
+    dest_chain TEXT NOT NULL,
+    source_name TEXT,
+    dest_name TEXT,
+    packet_ack_p5 REAL,
+    packet_ack_median REAL,
+    packet_ack_p95 REAL,
+    packet_recv_p5 REAL,
+    packet_recv_median REAL,
+    packet_recv_p95 REAL,
+    write_ack_p5 REAL,
+    write_ack_median REAL,
+    write_ack_p95 REAL,
+    fetched_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(source_chain, dest_chain, fetched_at)
+);
 
--- Route analysis indexes
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_route ON transfers (source_chain, dest_chain);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_route_detail ON transfers (source_chain, dest_chain, source_name, dest_name);
-
--- Wallet analysis indexes  
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_sender_time ON transfers (sender, timestamp DESC);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_receiver_time ON transfers (receiver, timestamp DESC);
-
--- Token analysis indexes
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_token_time ON transfers (token_symbol, timestamp DESC) WHERE token_symbol IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_canonical_token_time ON transfers (canonical_token_symbol, timestamp DESC) WHERE canonical_token_symbol IS NOT NULL;
-
--- Partial indexes for recent data (much faster for dashboard queries)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_recent_1h ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '1 hour';
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_recent_1d ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '1 day';
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_recent_7d ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '7 days';
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_recent_30d ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '30 days';
-
--- Composite indexes for common query patterns
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_chain_timestamp ON transfers (source_chain, timestamp DESC);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transfers_dest_timestamp ON transfers (dest_chain, timestamp DESC);
+-- Node health data (unchanged structure)
+CREATE TABLE IF NOT EXISTS node_health (
+    id BIGSERIAL PRIMARY KEY,
+    chain_id TEXT NOT NULL,
+    chain_name TEXT NOT NULL,
+    rpc_url TEXT NOT NULL,
+    rpc_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    response_time_ms INTEGER,
+    latest_block_height BIGINT,
+    error_message TEXT,
+    uptime REAL,
+    checked_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(rpc_url, checked_at)
+);
 
 -- =======================
--- MATERIALIZED VIEWS (GAME CHANGER)
+-- 2. CREATE INDEXES SECOND
+-- =======================
+
+-- Analytical indexes (CRITICAL for performance on 5.5M+ records)
+-- BRIN index for timestamp (perfect for time-series data, much smaller than B-tree)
+CREATE INDEX IF NOT EXISTS idx_transfers_timestamp_brin ON transfers USING BRIN (timestamp);
+
+-- Route analysis indexes
+CREATE INDEX IF NOT EXISTS idx_transfers_route ON transfers (source_chain, dest_chain);
+CREATE INDEX IF NOT EXISTS idx_transfers_route_detail ON transfers (source_chain, dest_chain, source_name, dest_name);
+
+-- Wallet analysis indexes  
+CREATE INDEX IF NOT EXISTS idx_transfers_sender_time ON transfers (sender, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_transfers_receiver_time ON transfers (receiver, timestamp DESC);
+
+-- Token analysis indexes
+CREATE INDEX IF NOT EXISTS idx_transfers_token_time ON transfers (token_symbol, timestamp DESC) WHERE token_symbol IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transfers_canonical_token_time ON transfers (canonical_token_symbol, timestamp DESC) WHERE canonical_token_symbol IS NOT NULL;
+
+-- Partial indexes for recent data (much faster for dashboard queries)
+CREATE INDEX IF NOT EXISTS idx_transfers_recent_1h ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '1 hour';
+CREATE INDEX IF NOT EXISTS idx_transfers_recent_1d ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '1 day';
+CREATE INDEX IF NOT EXISTS idx_transfers_recent_7d ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '7 days';
+CREATE INDEX IF NOT EXISTS idx_transfers_recent_30d ON transfers (timestamp DESC) WHERE timestamp > NOW() - INTERVAL '30 days';
+
+-- Composite indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_transfers_chain_timestamp ON transfers (source_chain, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_transfers_dest_timestamp ON transfers (dest_chain, timestamp DESC);
+
+-- Indexes for latency data
+CREATE INDEX IF NOT EXISTS idx_latency_route ON latency_data (source_chain, dest_chain);
+CREATE INDEX IF NOT EXISTS idx_latency_fetched ON latency_data (fetched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_latency_latest ON latency_data (source_chain, dest_chain, fetched_at DESC);
+
+-- Indexes for node health
+CREATE INDEX IF NOT EXISTS idx_node_health_chain ON node_health (chain_id, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_node_health_status ON node_health (status, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_node_health_checked ON node_health (checked_at DESC);
+
+-- =======================
+-- 3. CREATE MATERIALIZED VIEWS THIRD
 -- =======================
 
 -- 1. Transfer rates for all time periods (replaces expensive real-time counts)
@@ -224,8 +278,8 @@ FROM outgoing o
 FULL OUTER JOIN incoming i ON o.chain_id = i.chain_id
 ORDER BY (COALESCE(o.outgoing_count, 0) + COALESCE(i.incoming_count, 0)) DESC;
 
--- Index for fast lookups
-CREATE INDEX IF NOT EXISTS idx_chain_flows_activity ON chain_flows (outgoing_count + incoming_count DESC);
+-- Index for fast lookups (fixed syntax)
+CREATE INDEX IF NOT EXISTS idx_chain_flows_activity ON chain_flows ((outgoing_count + incoming_count) DESC);
 
 -- 5. Asset volumes (replaces expensive token aggregations)
 CREATE MATERIALIZED VIEW IF NOT EXISTS asset_volumes AS
@@ -280,59 +334,7 @@ ORDER BY count DESC
 LIMIT 50;
 
 -- =======================
--- SUPPORTING TABLES
--- =======================
-
--- Latency data (unchanged structure, but with PostgreSQL optimizations)
-CREATE TABLE IF NOT EXISTS latency_data (
-    id BIGSERIAL PRIMARY KEY,
-    source_chain TEXT NOT NULL,
-    dest_chain TEXT NOT NULL,
-    source_name TEXT,
-    dest_name TEXT,
-    packet_ack_p5 REAL,
-    packet_ack_median REAL,
-    packet_ack_p95 REAL,
-    packet_recv_p5 REAL,
-    packet_recv_median REAL,
-    packet_recv_p95 REAL,
-    write_ack_p5 REAL,
-    write_ack_median REAL,
-    write_ack_p95 REAL,
-    fetched_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(source_chain, dest_chain, fetched_at)
-);
-
--- Indexes for latency data
-CREATE INDEX IF NOT EXISTS idx_latency_route ON latency_data (source_chain, dest_chain);
-CREATE INDEX IF NOT EXISTS idx_latency_fetched ON latency_data (fetched_at DESC);
-CREATE INDEX IF NOT EXISTS idx_latency_latest ON latency_data (source_chain, dest_chain, fetched_at DESC);
-
--- Node health data (unchanged structure)
-CREATE TABLE IF NOT EXISTS node_health (
-    id BIGSERIAL PRIMARY KEY,
-    chain_id TEXT NOT NULL,
-    chain_name TEXT NOT NULL,
-    rpc_url TEXT NOT NULL,
-    rpc_type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    response_time_ms INTEGER,
-    latest_block_height BIGINT,
-    error_message TEXT,
-    uptime REAL,
-    checked_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(rpc_url, checked_at)
-);
-
--- Indexes for node health
-CREATE INDEX IF NOT EXISTS idx_node_health_chain ON node_health (chain_id, checked_at DESC);
-CREATE INDEX IF NOT EXISTS idx_node_health_status ON node_health (status, checked_at DESC);
-CREATE INDEX IF NOT EXISTS idx_node_health_checked ON node_health (checked_at DESC);
-
--- =======================
--- MATERIALIZED VIEW REFRESH FUNCTIONS
+-- 4. CREATE FUNCTIONS FOURTH
 -- =======================
 
 -- Create refresh function for all materialized views
@@ -372,14 +374,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Schedule automatic refresh every 15 seconds (replaces the Go background job)
--- This requires pg_cron extension
-SELECT cron.schedule('refresh-analytics', '*/15 * * * * *', 'SELECT refresh_analytics();');
-
--- =======================
--- MIGRATION HELPER FUNCTIONS
--- =======================
-
 -- Function to estimate migration progress
 CREATE OR REPLACE FUNCTION migration_progress() RETURNS TABLE(
   table_name TEXT,
@@ -398,10 +392,24 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Initial refresh of materialized views (run after data migration)
+-- =======================
+-- 5. INITIALIZE DATA
+-- =======================
+
+-- Initial refresh of materialized views (will be empty but structure is ready)
 SELECT refresh_analytics();
 
 -- Analyze tables for better query planning
 ANALYZE transfers;
 ANALYZE latency_data;
-ANALYZE node_health; 
+ANALYZE node_health;
+
+-- Success message
+DO $$
+BEGIN
+  RAISE NOTICE '✅ PostgreSQL schema created successfully!';
+  RAISE NOTICE '📊 Tables: transfers, latency_data, node_health';
+  RAISE NOTICE '🚀 Materialized views: 7 views for ultra-fast analytics';
+  RAISE NOTICE '⚡ Indexes: Optimized for 5.5M+ records';
+  RAISE NOTICE '🔄 Auto-refresh: Call refresh_analytics() or use pg_cron';
+END $$; 
