@@ -15,6 +15,9 @@ type Transfer struct {
 	BaseAmount      string `json:"base_amount"`
 	BaseTokenSymbol string `json:"base_token_symbol"`
 	
+	// Canonical token for asset tracking (normalized across wrapping/unwrapping)
+	CanonicalTokenSymbol string `json:"canonical_token_symbol"`
+	
 	// Addresses (canonical format)
 	SenderCanonical   string `json:"sender_canonical"`
 	ReceiverCanonical string `json:"receiver_canonical"`
@@ -30,12 +33,25 @@ type Transfer struct {
 	// Additional fields
 	PacketHash string `json:"packet_hash"`
 	
+	// Wrapping information
+	WrapDirection   string        `json:"wrap_direction"`
+	QuoteWrapping   []Wrapping    `json:"quote_wrapping"`
+	BaseWrapping    []Wrapping    `json:"base_wrapping"`
+	
 	// Enhancement fields (added during processing)
 	IsTestnetTransfer      bool   `json:"isTestnetTransfer"`
 	FormattedTimestamp     string `json:"formattedTimestamp"`
 	RouteKey               string `json:"routeKey"`
 	SourceDisplayName      string `json:"sourceDisplayName"`
 	DestinationDisplayName string `json:"destinationDisplayName"`
+}
+
+// Wrapping represents token wrapping information
+type Wrapping struct {
+	UnwrappedDenom   string `json:"unwrapped_denom"`
+	WrappedDenom     string `json:"wrapped_denom"`
+	UnwrappedChainID string `json:"unwrapped_chain_id"`
+	WrappedChainID   string `json:"wrapped_chain_id"`
 }
 
 // BroadcastTransfer represents transfer data sent to WebSocket clients

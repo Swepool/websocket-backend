@@ -16,7 +16,7 @@ import (
 
 // Config holds fetcher configuration
 type Config struct {
-	PollInterval time.Duration `json:"pollInterval"` // How often to fetch (default: 5s)
+	PollInterval time.Duration `json:"pollInterval"` // How often to fetch (default: 500ms)
 	BatchSize    int           `json:"batchSize"`    // Max transfers per batch (default: 50)
 	MockMode     bool          `json:"mockMode"`     // Use mock data (default: false)
 	GraphQLURL   string        `json:"graphqlUrl"`   // GraphQL endpoint URL
@@ -25,7 +25,7 @@ type Config struct {
 // DefaultConfig returns default fetcher configuration
 func DefaultConfig() Config {
 	return Config{
-		PollInterval: 500 * time.Millisecond, // Fast polling for real-time transfers
+		PollInterval: 500 * time.Millisecond, // Optimal 500ms polling for real-time transfers
 		BatchSize:    100,
 		MockMode:     false, // Always use real data
 		GraphQLURL:   "https://staging.graphql.union.build/v1/graphql",
@@ -37,6 +37,13 @@ type ChainProvider interface {
 	GetAllChains() []models.Chain
 }
 
+// DatabaseWriter interface for accessing database state
+type DatabaseWriter interface {
+	GetLatestSortOrder() (string, error)
+	GetEarliestSortOrder() (string, error) // For backward syncing
+	GetTransferCount() (int64, error)
+}
+
 // Fetcher handles fetching transfers from the GraphQL API
 type Fetcher struct {
 	config        Config
@@ -45,6 +52,7 @@ type Fetcher struct {
 	rand          *rand.Rand
 	httpClient    *http.Client
 	lastSortOrder string
+	dbWriter      DatabaseWriter // Interface to get latest sort order
 }
 
 // NewFetcher creates a new fetcher
@@ -55,13 +63,35 @@ func NewFetcher(config Config, channels *channels.Channels, chainProvider ChainP
 		chainProvider: chainProvider,
 		rand:          rand.New(rand.NewSource(time.Now().UnixNano())),
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
-		lastSortOrder: "",
+		lastSortOrder: "", // Will be initialized from database in Start()
 	}, nil
+}
+
+// SetDatabaseWriter sets the database writer for accessing latest sort order
+func (f *Fetcher) SetDatabaseWriter(dbWriter DatabaseWriter) {
+	f.dbWriter = dbWriter
 }
 
 // Start begins the fetcher thread
 func (f *Fetcher) Start(ctx context.Context) {
+	utils.LogInfo("FETCHER", "Starting fetcher thread")
 	
+	// Initialize lastSortOrder from database on startup
+	if f.dbWriter != nil {
+		if sortOrder, err := f.dbWriter.GetLatestSortOrder(); err == nil && sortOrder != "" {
+			f.lastSortOrder = sortOrder
+			utils.LogInfo("FETCHER", "Initialized from database - continuing from sort order: %s", sortOrder)
+			
+			// Log database stats for context
+			if count, err := f.dbWriter.GetTransferCount(); err == nil {
+				utils.LogInfo("FETCHER", "Database contains %d existing transfers", count)
+			}
+		} else {
+			utils.LogInfo("FETCHER", "No existing transfers in database - starting fresh")
+		}
+	} else {
+		utils.LogWarn("FETCHER", "No database writer set - starting without state restoration")
+	}
 	
 	ticker := time.NewTicker(f.config.PollInterval)
 	defer ticker.Stop()
@@ -69,6 +99,7 @@ func (f *Fetcher) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			utils.LogInfo("FETCHER", "Stopping fetcher thread")
 			return
 			
 		case <-ticker.C:
@@ -92,18 +123,29 @@ func (f *Fetcher) fetchAndSend() {
 	}
 	
 	if len(transfers) > 0 {
-		// Use batch logger for high-frequency events
-		utils.BatchInfo("FETCHER", fmt.Sprintf("Generated %d transfers, sending to enhancer", len(transfers)))
+		// Forward fetcher = all transfers are "live" since we're always fetching latest/newer
+		// The sort order pagination ensures we only get recent transfers going forward
+		liveTransfers := transfers // All forward-fetched transfers are live
 		
-		// Send with backpressure protection
+		utils.BatchInfo("FETCHER", fmt.Sprintf("🔴 FORWARD: Fetched %d LIVE transfers → storing + broadcasting", len(transfers)))
+		
+		// Use batch logger for high-frequency events
 		backpressureConfig := utils.DefaultBackpressureConfig()
 		backpressureConfig.DropOnOverflow = false // Don't drop transfers, they're valuable
 		backpressureConfig.TimeoutMs = 200       // 200ms timeout for transfers
 		
-		if utils.SendWithBackpressure(f.channels.RawTransfers, transfers, backpressureConfig, nil) {
-			utils.BatchInfo("FETCHER", fmt.Sprintf("Successfully sent %d transfers to enhancer", len(transfers)))
+		// Send ALL transfers to database
+		if utils.SendWithBackpressure(f.channels.DatabaseSaves, transfers, backpressureConfig, nil) {
+			utils.BatchInfo("FETCHER", fmt.Sprintf("✅ FORWARD: Stored %d live transfers in database", len(transfers)))
 		} else {
-			utils.BatchError("FETCHER", fmt.Sprintf("Failed to send %d transfers to enhancer (timeout/overflow)", len(transfers)))
+			utils.BatchError("FETCHER", fmt.Sprintf("❌ FORWARD: Failed to store %d live transfers", len(transfers)))
+		}
+		
+		// Send ALL transfers to processor for real-time broadcasting (forward = live)
+		if utils.SendWithBackpressure(f.channels.RawTransfers, liveTransfers, backpressureConfig, nil) {
+			utils.BatchInfo("FETCHER", fmt.Sprintf("📡 FORWARD: Broadcasted %d live transfers", len(liveTransfers)))
+		} else {
+			utils.BatchError("FETCHER", fmt.Sprintf("❌ FORWARD: Failed to broadcast %d live transfers", len(liveTransfers)))
 		}
 	}
 }

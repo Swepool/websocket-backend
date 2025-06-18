@@ -1,9 +1,6 @@
 <script lang="ts">
-import { chains } from "$lib/stores/chains.svelte"
-import type { TransferListItem } from "@unionlabs/sdk/schema"
-import { Option } from "effect"
-import Card from "./ui/Card.svelte"
-import Skeleton from "./ui/Skeleton.svelte"
+import Card from "$lib/components/ui/Card.svelte"
+import Skeleton from "$lib/components/ui/Skeleton.svelte"
 
 interface RouteData {
   route: string
@@ -78,7 +75,7 @@ const currentData = $derived.by(() => {
   ) {
     data = popularRoutesTimeScale[selectedTimeScale]
   } else {
-    data = popularRoutes
+    data = popularRoutes || []
   }
 
   // Limit to selected number for display
@@ -86,7 +83,7 @@ const currentData = $derived.by(() => {
 })
 
 const hasData = $derived(currentData.length > 0)
-const isLoading = $derived(!hasData && popularRoutes.length === 0)
+const isLoading = $derived(!hasData && (!popularRoutes || popularRoutes.length === 0))
 
 // Get total transfer count for percentage calculation
 const totalTransfersForTimeframe = $derived(() => {
@@ -101,9 +98,15 @@ const maxCount = $derived(
 
 // Utility functions
 function formatCount(count: number): string {
-  if (count === 0) return '0'
-  if (count >= 1000000) return `${(count / 1000000).toFixed(1)}M`
-  if (count >= 1000) return `${(count / 1000).toFixed(1)}K`
+  if (count === 0) {
+    return "0"
+  }
+  if (count >= 1000000) {
+    return `${(count / 1000000).toFixed(1)}M`
+  }
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}K`
+  }
   return count.toString()
 }
 
@@ -122,7 +125,7 @@ function formatPercentageChange(change?: number): string {
 function isTimeFrameAvailable(timeFrameKey: string): boolean {
   const availabilityMap: Record<string, keyof DataAvailability> = {
     "1m": "hasMinute",
-    "1h": "hasHour", 
+    "1h": "hasHour",
     "1d": "hasDay",
     "7d": "has7Days",
     "14d": "has14Days",
@@ -153,7 +156,18 @@ $effect(() => {
   }
 })
 
-
+// Debug logging in development
+$effect(() => {
+  if (import.meta.env.DEV) {
+    console.log("PopularRoutesChart data:", {
+      hasData,
+      isLoading,
+      currentDataLength: currentData.length,
+      routesLength: popularRoutes?.length || 0,
+      selectedItemCount: selectedItemCount,
+    })
+  }
+})
 </script>
 
 <Card class="h-full p-0">
@@ -182,13 +196,15 @@ $effect(() => {
         <div class="flex flex-wrap gap-0.5">
           {#each timeScales as timeScale}
             <button
-              class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
+              class="
+                px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
                 selectedTimeScale === timeScale.key
-                  ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
-                  : isTimeFrameAvailable(timeScale.key)
-                  ? 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
-                  : 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
-              }"
+                ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
+                : isTimeFrameAvailable(timeScale.key)
+                ? 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
+                : 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
+                }
+              "
               disabled={!isTimeFrameAvailable(timeScale.key)}
               onclick={() => selectedTimeScale = timeScale.key}
             >
@@ -202,11 +218,13 @@ $effect(() => {
           <span class="text-zinc-600 text-xs font-mono">show:</span>
           {#each itemCounts as itemCount}
             <button
-              class="px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
+              class="
+                px-2 py-1 text-xs font-mono border transition-colors min-h-[32px] {
                 selectedItemCount === itemCount.value
-                  ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
-                  : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
-              }"
+                ? 'border-zinc-500 bg-zinc-800 text-zinc-200 font-medium'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
+                }
+              "
               onclick={() => selectedItemCount = itemCount.value}
             >
               {itemCount.label}
@@ -273,7 +291,8 @@ $effect(() => {
                     </span>
                   </div>
                   <div class="flex items-center space-x-1">
-                    {#if isTimeFrameAvailable(selectedTimeScale) && route.countChange !== undefined}
+                    {#if isTimeFrameAvailable(selectedTimeScale)
+                    && route.countChange !== undefined}
                       <span
                         class="text-xs tabular-nums {route.countChange >= 0 ? 'text-green-400' : 'text-red-400'}"
                       >{formatPercentageChange(route.countChange)}</span>
@@ -289,27 +308,31 @@ $effect(() => {
                   <div class="flex-1 flex min-w-0">
                     <!-- Desktop: Thinner bar -->
                     <div class="hidden sm:flex w-full h-1">
-                      <div 
+                      <div
                         class="bg-zinc-300 h-full transition-all duration-300"
                         style="width: {(route.count / totalTransfersForTimeframe()) * 100}%"
                         title="Count: {route.count}"
-                      ></div>
-                      <div 
+                      >
+                      </div>
+                      <div
                         class="bg-zinc-800 h-full transition-all duration-300"
                         style="width: {100 - (route.count / totalTransfersForTimeframe()) * 100}%"
-                      ></div>
+                      >
+                      </div>
                     </div>
                     <!-- Mobile: Thicker bar for better visibility -->
                     <div class="flex sm:hidden w-full h-1.5">
-                      <div 
+                      <div
                         class="bg-zinc-300 h-full transition-all duration-300"
                         style="width: {(route.count / totalTransfersForTimeframe()) * 100}%"
                         title="Count: {route.count}"
-                      ></div>
-                      <div 
+                      >
+                      </div>
+                      <div
                         class="bg-zinc-800 h-full transition-all duration-300"
                         style="width: {100 - (route.count / totalTransfersForTimeframe()) * 100}%"
-                      ></div>
+                      >
+                      </div>
                     </div>
                   </div>
                   <span class="text-zinc-500 text-xs tabular-nums">
@@ -326,21 +349,21 @@ $effect(() => {
 </Card>
 
 <style>
-  /* Custom scrollbar styling */
-  .overflow-y-auto::-webkit-scrollbar {
-    width: 4px;
-  }
-  
-  .overflow-y-auto::-webkit-scrollbar-track {
-    background: #27272a;
-  }
-  
-  .overflow-y-auto::-webkit-scrollbar-thumb {
-    background: #52525b;
-    border-radius: 2px;
-  }
-  
-  .overflow-y-auto::-webkit-scrollbar-thumb:hover {
-    background: #71717a;
-  }
+/* Custom scrollbar styling */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 4px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: #27272a;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: #52525b;
+  border-radius: 2px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: #71717a;
+}
 </style>

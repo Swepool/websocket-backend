@@ -8,9 +8,9 @@ import (
 	"websocket-backend-new/internal/pipeline"
 	"websocket-backend-new/internal/chains"
 	"websocket-backend-new/internal/fetcher"
-	"websocket-backend-new/internal/enhancer"
+	"websocket-backend-new/internal/processor"
 	"websocket-backend-new/internal/scheduler"
-	"websocket-backend-new/internal/stats"
+	"websocket-backend-new/internal/database"
 	"websocket-backend-new/internal/broadcaster"
 )
 
@@ -20,9 +20,9 @@ type Config struct {
 	Chains      chains.Config       `json:"chains"`
 	Pipeline    pipeline.Config     `json:"pipeline"`
 	Fetcher     fetcher.Config      `json:"fetcher"`
-	Enhancer    enhancer.Config     `json:"enhancer"`
+	Processor   processor.Config    `json:"processor"`
 	Scheduler   scheduler.Config    `json:"scheduler"`
-	Stats       stats.Config        `json:"stats"`
+	Database    database.Config     `json:"database"`
 	Broadcaster broadcaster.Config  `json:"broadcaster"`
 }
 
@@ -46,9 +46,9 @@ func DefaultConfig() Config {
 		Chains:      chains.DefaultConfig(),
 		Pipeline:    pipelineConfig,
 		Fetcher:     fetcherConfig,
-		Enhancer:    enhancer.DefaultConfig(),
+		Processor:   processor.DefaultConfig(),
 		Scheduler:   scheduler.DefaultConfig(),
-		Stats:       stats.DefaultConfig(),
+		Database:    database.DefaultConfig(),
 		Broadcaster: getDefaultBroadcasterConfig(),
 	}
 }
@@ -56,9 +56,9 @@ func DefaultConfig() Config {
 // DefaultFetcherConfig returns optimized fetcher configuration for real transfers
 func DefaultFetcherConfig() fetcher.Config {
 	return fetcher.Config{
-		PollInterval: 2 * time.Second,        // Slower polling for testing
+		PollInterval: 500 * time.Millisecond, // Optimal 500ms polling for real-time transfers
 		BatchSize:    100,                    // Larger batches for better throughput
-		MockMode:     false,                   // Use mock data for testing
+		MockMode:     false,                  // Use real data
 		GraphQLURL:   "https://staging.graphql.union.build/v1/graphql",
 	}
 }
@@ -90,9 +90,10 @@ func HighPerformanceConfig() Config {
 	config.Fetcher.PollInterval = 500 * time.Millisecond
 	config.Fetcher.BatchSize = 200
 	
-	// Optimized scheduler settings
-	config.Pipeline.Scheduler.MinDelay = 100 * time.Millisecond
-	config.Pipeline.Scheduler.MaxDelay = 1 * time.Second
+	// Optimized scheduler settings for timestamp-based timing
+	config.Pipeline.Scheduler.LiveOffset = 1 * time.Second     // Faster live offset for high performance
+	config.Pipeline.Scheduler.MaxBacklog = 5 * time.Second     // Shorter backlog for responsiveness
+	config.Pipeline.Scheduler.MinInterval = 25 * time.Millisecond // Tighter micro-spacing
 	
 	return config
 }
@@ -116,8 +117,8 @@ func DevelopmentConfig() Config {
 	config.Broadcaster.NumShards = 1
 	config.Broadcaster.WorkersPerShard = 2
 	
-	// Slower polling for development
-	config.Fetcher.PollInterval = 5 * time.Second
+	// Keep optimal 500ms polling even in development
+	config.Fetcher.PollInterval = 500 * time.Millisecond
 	config.Fetcher.BatchSize = 50
 	
 	return config

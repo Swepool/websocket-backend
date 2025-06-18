@@ -195,10 +195,10 @@ func IsInfoEnabled() bool {
 // Component-specific loggers for different parts of the system
 var (
 	FetcherLogger     = NewLogger("FETCHER")
-	EnhancerLogger    = NewLogger("ENHANCER")
+	ProcessorLogger   = NewLogger("PROCESSOR")
 	SchedulerLogger   = NewLogger("SCHEDULER")
 	BroadcasterLogger = NewLogger("BROADCASTER")
-	StatsLogger       = NewLogger("STATS")
+	DatabaseLogger    = NewLogger("DATABASE")
 	ChainsLogger      = NewLogger("CHAINS")
 )
 
@@ -207,18 +207,18 @@ func InitializeComponentLoggers() {
 	// Set levels based on component needs
 	if os.Getenv("ENABLE_DEBUG_LOGS") == "true" {
 		FetcherLogger.SetLevel(DEBUG)
-		EnhancerLogger.SetLevel(DEBUG)
+		ProcessorLogger.SetLevel(DEBUG)
 		SchedulerLogger.SetLevel(DEBUG)
 		BroadcasterLogger.SetLevel(DEBUG)
-		StatsLogger.SetLevel(DEBUG)
+		DatabaseLogger.SetLevel(DEBUG)
 		ChainsLogger.SetLevel(DEBUG)
 	} else {
 		// Production levels - reduce noise
 		FetcherLogger.SetLevel(INFO)
-		EnhancerLogger.SetLevel(WARN)    // Less verbose for enhancer
+		ProcessorLogger.SetLevel(WARN)   // Less verbose for processor
 		SchedulerLogger.SetLevel(WARN)   // Less verbose for scheduler
 		BroadcasterLogger.SetLevel(INFO)
-		StatsLogger.SetLevel(WARN)       // Less verbose for stats
+		DatabaseLogger.SetLevel(WARN)    // Less verbose for database
 		ChainsLogger.SetLevel(INFO)
 	}
 }
@@ -227,9 +227,9 @@ func InitializeComponentLoggers() {
 func HighPerformanceMode() {
 	SetGlobalLevel(WARN)
 	FetcherLogger.SetLevel(WARN)
-	EnhancerLogger.SetLevel(ERROR)
+	ProcessorLogger.SetLevel(ERROR)
 	SchedulerLogger.SetLevel(ERROR)
 	BroadcasterLogger.SetLevel(WARN)
-	StatsLogger.SetLevel(ERROR)
+	DatabaseLogger.SetLevel(ERROR)
 	ChainsLogger.SetLevel(WARN)
 } 

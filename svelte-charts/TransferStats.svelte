@@ -1,7 +1,7 @@
 <script lang="ts">
 // TransferStats with data availability and wallet info
-import { transactionAudio } from "../../routes/visual/audio"
-import Card from "./ui/Card.svelte"
+import Card from "$lib/components/ui/Card.svelte"
+import { transactionAudio } from "../audio"
 
 interface TransferRates {
   txPerMinute: number
@@ -161,6 +161,24 @@ function formatPercentageChange(change?: number): string {
   return `(${sign}${change.toFixed(1)}%)`
 }
 
+// Helper function to format large numbers with k/m/b abbreviations
+function formatNumber(num: number): string {
+  if (num === 0) return "0"
+  
+  const absNum = Math.abs(num)
+  const sign = num < 0 ? "-" : ""
+  
+  if (absNum >= 1_000_000_000) {
+    return `${sign}${(absNum / 1_000_000_000).toFixed(1)}b`
+  } else if (absNum >= 1_000_000) {
+    return `${sign}${(absNum / 1_000_000).toFixed(1)}m`
+  } else if (absNum >= 1_000) {
+    return `${sign}${(absNum / 1_000).toFixed(1)}k`
+  } else {
+    return `${sign}${absNum}`
+  }
+}
+
 // Default empty state
 let rates = $derived(
   transferRates || DEFAULT_TRANSFER_RATES,
@@ -173,16 +191,24 @@ let wallets = $derived(
 // Format uptime for display
 let uptimeDisplay = $derived(() => {
   const seconds = rates.serverUptimeSeconds
-  if (seconds < 60) {
-    return `${seconds}s`
+  if (!seconds || seconds <= 0) {
+    return "0s"
   }
-  if (seconds < 3600) {
-    return `${Math.floor(seconds / 60)}m`
+  
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = Math.floor(seconds % 60)
+  
+  if (days > 0) {
+    return `${days}d${hours > 0 ? `${hours}h` : ""}`
+  } else if (hours > 0) {
+    return `${hours}h${minutes > 0 ? `${minutes}m` : ""}`
+  } else if (minutes > 0) {
+    return `${minutes}m${secs > 0 ? `${secs}s` : ""}`
+  } else {
+    return `${secs}s`
   }
-  if (seconds < 86400) {
-    return `${Math.floor(seconds / 3600)}h`
-  }
-  return `${Math.floor(seconds / 86400)}d`
 })
 
 let isMuted = $state(!transactionAudio.isEnabled())
@@ -198,7 +224,17 @@ const toggleMute = async () => {
   }
 }
 
-
+// Debug logging in development
+$effect(() => {
+  if (import.meta.env.DEV) {
+    console.log("TransferStats data:", {
+      hasTransferRates: !!transferRates,
+      hasWalletRates: !!activeWalletRates,
+      connectionStatus,
+      uptimeSeconds: rates.serverUptimeSeconds,
+    })
+  }
+})
 
 // Get data availability - prefer from activeWalletRates, fallback to prop
 let walletDataAvailability = $derived(
@@ -209,7 +245,7 @@ let walletDataAvailability = $derived(
     has7Days: false,
     has14Days: false,
     has30Days: false,
-  }
+  },
 )
 </script>
 
@@ -313,7 +349,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(rates.txPerMinuteChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[11px] sm:text-[10px]">
-                  {rates.dataAvailability.hasMinute ? rates.txPerMinute : "--"}
+                  {
+                    rates.dataAvailability.hasMinute
+                    ? formatNumber(rates.txPerMinute)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -326,7 +366,7 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(rates.txPerHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {rates.dataAvailability.hasHour ? rates.txPerHour : "--"}
+                  {rates.dataAvailability.hasHour ? formatNumber(rates.txPerHour) : "--"}
                 </span>
               </div>
             </div>
@@ -339,7 +379,7 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(rates.txPerDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {rates.dataAvailability.hasDay ? rates.txPerDay : "--"}
+                  {rates.dataAvailability.hasDay ? formatNumber(rates.txPerDay) : "--"}
                 </span>
               </div>
             </div>
@@ -352,7 +392,7 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(rates.txPer7DaysChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {rates.dataAvailability.has7Days ? rates.txPer7Days : "--"}
+                  {rates.dataAvailability.has7Days ? formatNumber(rates.txPer7Days) : "--"}
                 </span>
               </div>
             </div>
@@ -365,7 +405,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(rates.txPer30DaysChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {rates.dataAvailability.has30Days ? rates.txPer30Days : "--"}
+                  {
+                    rates.dataAvailability.has30Days
+                    ? formatNumber(rates.txPer30Days)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -385,7 +429,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.sendersLastMinChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasMinute ? wallets.sendersLastMin : "--"}
+                  {
+                    walletDataAvailability.hasMinute
+                    ? formatNumber(wallets.sendersLastMin)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -398,7 +446,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.sendersLastHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasHour ? wallets.sendersLastHour : "--"}
+                  {
+                    walletDataAvailability.hasHour
+                    ? formatNumber(wallets.sendersLastHour)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -411,7 +463,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.sendersLastDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasDay ? wallets.sendersLastDay : "--"}
+                  {
+                    walletDataAvailability.hasDay
+                    ? formatNumber(wallets.sendersLastDay)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -424,7 +480,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.sendersLast7dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.has7Days ? wallets.sendersLast7d : "--"}
+                  {
+                    walletDataAvailability.has7Days
+                    ? formatNumber(wallets.sendersLast7d)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -437,7 +497,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.sendersLast30dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.has30Days ? wallets.sendersLast30d : "--"}
+                  {
+                    walletDataAvailability.has30Days
+                    ? formatNumber(wallets.sendersLast30d)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -457,7 +521,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.receiversLastMinChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasMinute ? wallets.receiversLastMin : "--"}
+                  {
+                    walletDataAvailability.hasMinute
+                    ? formatNumber(wallets.receiversLastMin)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -470,7 +538,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.receiversLastHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasHour ? wallets.receiversLastHour : "--"}
+                  {
+                    walletDataAvailability.hasHour
+                    ? formatNumber(wallets.receiversLastHour)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -483,7 +555,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.receiversLastDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasDay ? wallets.receiversLastDay : "--"}
+                  {
+                    walletDataAvailability.hasDay
+                    ? formatNumber(wallets.receiversLastDay)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -496,7 +572,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.receiversLast7dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.has7Days ? wallets.receiversLast7d : "--"}
+                  {
+                    walletDataAvailability.has7Days
+                    ? formatNumber(wallets.receiversLast7d)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -509,7 +589,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.receiversLast30dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.has30Days ? wallets.receiversLast30d : "--"}
+                  {
+                    walletDataAvailability.has30Days
+                    ? formatNumber(wallets.receiversLast30d)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -529,7 +613,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.totalLastMinChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasMinute ? wallets.totalLastMin : "--"}
+                  {
+                    walletDataAvailability.hasMinute
+                    ? formatNumber(wallets.totalLastMin)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -542,7 +630,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.totalLastHourChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasHour ? wallets.totalLastHour : "--"}
+                  {
+                    walletDataAvailability.hasHour
+                    ? formatNumber(wallets.totalLastHour)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -555,7 +647,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.totalLastDayChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.hasDay ? wallets.totalLastDay : "--"}
+                  {
+                    walletDataAvailability.hasDay
+                    ? formatNumber(wallets.totalLastDay)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -568,7 +664,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.totalLast7dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.has7Days ? wallets.totalLast7d : "--"}
+                  {
+                    walletDataAvailability.has7Days
+                    ? formatNumber(wallets.totalLast7d)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>
@@ -581,7 +681,11 @@ let walletDataAvailability = $derived(
                   >{formatPercentageChange(wallets.totalLast30dChange)}</span>
                 {/if}
                 <span class="text-zinc-100 tabular-nums text-[10px]">
-                  {walletDataAvailability.has30Days ? wallets.totalLast30d : "--"}
+                  {
+                    walletDataAvailability.has30Days
+                    ? formatNumber(wallets.totalLast30d)
+                    : "--"
+                  }
                 </span>
               </div>
             </div>

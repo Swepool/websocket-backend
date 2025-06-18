@@ -68,6 +68,31 @@ const (
 				base_token_decimals
 				sort_order
 				packet_hash
+				wrap_direction
+				quote_token_meta {
+					wrapping {
+						unwrapped_denom
+						wrapped_denom
+						unwrapped_chain {
+							universal_chain_id
+						}
+						wrapped_chain {
+							universal_chain_id
+						}
+					}
+				}
+				base_token_meta {
+					wrapping {
+						unwrapped_chain {
+							universal_chain_id
+						}
+						wrapped_chain {
+							universal_chain_id
+						}
+						wrapped_denom
+						unwrapped_denom
+					}
+				}
 			}
 		}
 	`
@@ -107,6 +132,31 @@ const (
 				base_token_decimals
 				sort_order
 				packet_hash
+				wrap_direction
+				quote_token_meta {
+					wrapping {
+						unwrapped_denom
+						wrapped_denom
+						unwrapped_chain {
+							universal_chain_id
+						}
+						wrapped_chain {
+							universal_chain_id
+						}
+					}
+				}
+				base_token_meta {
+					wrapping {
+						unwrapped_chain {
+							universal_chain_id
+						}
+						wrapped_chain {
+							universal_chain_id
+						}
+						wrapped_denom
+						unwrapped_denom
+					}
+				}
 			}
 		}
 	`
@@ -169,19 +219,37 @@ type GraphQLResponse struct {
 
 // Raw response structures matching the GraphQL schema
 type RawTransfer struct {
-	SourceChain                  RawChain  `json:"source_chain"`
-	DestinationChain             RawChain  `json:"destination_chain"`
-	SenderCanonical              string    `json:"sender_canonical"`
-	SenderDisplay                string    `json:"sender_display"`
-	ReceiverCanonical            string    `json:"receiver_canonical"`
-	ReceiverDisplay              string    `json:"receiver_display"`
-	TransferSendTimestamp        time.Time `json:"transfer_send_timestamp"`
-	BaseToken                    string    `json:"base_token"`
-	BaseAmount                   string    `json:"base_amount"`
-	BaseTokenSymbol              string    `json:"base_token_symbol"`
-	BaseTokenDecimals            int       `json:"base_token_decimals"`
-	SortOrder                    string    `json:"sort_order"`
-	PacketHash                   string    `json:"packet_hash"`
+	SourceChain                  RawChain           `json:"source_chain"`
+	DestinationChain             RawChain           `json:"destination_chain"`
+	SenderCanonical              string             `json:"sender_canonical"`
+	SenderDisplay                string             `json:"sender_display"`
+	ReceiverCanonical            string             `json:"receiver_canonical"`
+	ReceiverDisplay              string             `json:"receiver_display"`
+	TransferSendTimestamp        time.Time          `json:"transfer_send_timestamp"`
+	BaseToken                    string             `json:"base_token"`
+	BaseAmount                   string             `json:"base_amount"`
+	BaseTokenSymbol              string             `json:"base_token_symbol"`
+	BaseTokenDecimals            int                `json:"base_token_decimals"`
+	SortOrder                    string             `json:"sort_order"`
+	PacketHash                   string             `json:"packet_hash"`
+	WrapDirection                string             `json:"wrap_direction"`
+	QuoteTokenMeta               RawTokenMeta       `json:"quote_token_meta"`
+	BaseTokenMeta                RawTokenMeta       `json:"base_token_meta"`
+}
+
+type RawTokenMeta struct {
+	Wrapping []RawWrapping `json:"wrapping"`
+}
+
+type RawWrapping struct {
+	UnwrappedDenom  string          `json:"unwrapped_denom"`
+	WrappedDenom    string          `json:"wrapped_denom"`
+	UnwrappedChain  RawWrappingChain `json:"unwrapped_chain"`
+	WrappedChain    RawWrappingChain `json:"wrapped_chain"`
+}
+
+type RawWrappingChain struct {
+	UniversalChainID string `json:"universal_chain_id"`
 }
 
 type RawChain struct {
@@ -207,6 +275,30 @@ type LatencyStats struct {
 
 // Convert raw transfer to model
 func (r RawTransfer) ToModel() models.Transfer {
+	// Convert wrapping data
+	quoteWrapping := make([]models.Wrapping, len(r.QuoteTokenMeta.Wrapping))
+	for i, w := range r.QuoteTokenMeta.Wrapping {
+		quoteWrapping[i] = models.Wrapping{
+			UnwrappedDenom:   w.UnwrappedDenom,
+			WrappedDenom:     w.WrappedDenom,
+			UnwrappedChainID: w.UnwrappedChain.UniversalChainID,
+			WrappedChainID:   w.WrappedChain.UniversalChainID,
+		}
+	}
+	
+	baseWrapping := make([]models.Wrapping, len(r.BaseTokenMeta.Wrapping))
+	for i, w := range r.BaseTokenMeta.Wrapping {
+		baseWrapping[i] = models.Wrapping{
+			UnwrappedDenom:   w.UnwrappedDenom,
+			WrappedDenom:     w.WrappedDenom,
+			UnwrappedChainID: w.UnwrappedChain.UniversalChainID,
+			WrappedChainID:   w.WrappedChain.UniversalChainID,
+		}
+	}
+	
+	// Calculate canonical token symbol
+	canonicalTokenSymbol := r.calculateCanonicalTokenSymbol()
+	
 	return models.Transfer{
 		PacketHash:            r.PacketHash,
 		SortOrder:             r.SortOrder,
@@ -219,7 +311,18 @@ func (r RawTransfer) ToModel() models.Transfer {
 		DestinationChain:      r.DestinationChain.ToModel(),
 		BaseAmount:            r.BaseAmount,
 		BaseTokenSymbol:       r.BaseTokenSymbol,
+		CanonicalTokenSymbol:  canonicalTokenSymbol,
+		WrapDirection:         r.WrapDirection,
+		QuoteWrapping:         quoteWrapping,
+		BaseWrapping:          baseWrapping,
 	}
+}
+
+// calculateCanonicalTokenSymbol determines the canonical token symbol for asset tracking
+// Since base_token_symbol already contains the correct symbol for all transfers,
+// we simply use it directly for canonical tracking
+func (r RawTransfer) calculateCanonicalTokenSymbol() string {
+	return r.BaseTokenSymbol
 }
 
 // Convert raw chain to model

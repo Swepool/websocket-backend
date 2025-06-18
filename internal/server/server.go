@@ -37,6 +37,14 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/broadcaster", s.handleBroadcasterStats)
+	mux.HandleFunc("/api/database", s.handleDatabaseStats) // Database storage monitoring
+	
+	// Pipeline component stats endpoints
+	mux.HandleFunc("/api/scheduler", s.handleSchedulerStats)   // Scheduler statistics
+	mux.HandleFunc("/api/processor", s.handleProcessorStats)   // Processor statistics  
+	mux.HandleFunc("/api/sync", s.handleSyncStats)            // Sync manager statistics
+	mux.HandleFunc("/api/pipeline", s.handlePipelineStats)    // Comprehensive pipeline stats
+	mux.HandleFunc("/api/cache", s.handleCacheStats)          // Chart data cache stats
 	
 	// Health check endpoint (for compatibility)
 	mux.HandleFunc("/health", s.handleHealth)

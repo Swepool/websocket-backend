@@ -1,0 +1,75 @@
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+transfers.db
+websocket.db
+websocket_backend.db
+data.db
+
+# Go build artifacts
+websocket-backend
+websocket_backend
+websocket-backend.exe
+websocket_backend.exe
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/pkg/
+/vendor/
+
+# Go test files
+*.test
+*.out
+coverage.txt
+
+# Go modules
+go.sum
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+tmp/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.bak
+*.backup
+
+# Temporary files
+temp/
+*.tmp
+
+# Node modules (if any frontend tools)
+node_modules/
+
+# Build directories
+build/
+dist/
+out/ 

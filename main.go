@@ -53,10 +53,11 @@ func main() {
 	}
 	utils.LogInfo("MAIN", "Pipeline coordinator created")
 	
-	// Set up latency callback to update stats collector
+	// Set up latency callback to store data in chart service
 	chainsService.SetLatencyCallback(func(latencyData []models.LatencyData) {
-		coordinator.GetStatsCollector().UpdateLatencyData(latencyData)
-		utils.LogInfo("MAIN", "Updated latency data with %d chain pairs", len(latencyData))
+		chartService := coordinator.GetChartService()
+		chartService.SetLatencyData(latencyData)
+		utils.LogInfo("MAIN", "Updated chart service with latency data for %d chain pairs", len(latencyData))
 	})
 	
 	// Create server with coordinator and chains service

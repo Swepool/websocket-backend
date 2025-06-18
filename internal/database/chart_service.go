@@ -1,0 +1,657 @@
+package database
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"sync"
+	"time"
+	"websocket-backend-new/models"
+	"websocket-backend-new/internal/utils"
+)
+
+// EnhancedChartService provides comprehensive chart data using hybrid approach
+type EnhancedChartService struct {
+	db          *sql.DB
+	latencyData []models.LatencyData
+	latencyMu   sync.RWMutex
+	
+	// Cache for expensive chart data (always served to clients)
+	cachedChartData map[string]interface{}
+	chartCacheMu    sync.RWMutex
+	lastCacheUpdate time.Time
+}
+
+// NewEnhancedChartService creates a new enhanced chart service
+func NewEnhancedChartService(db *sql.DB) *EnhancedChartService {
+	return &EnhancedChartService{
+		db:              db,
+		latencyData:     []models.LatencyData{},
+		cachedChartData: nil,
+	}
+}
+
+// Frontend-compatible data structures matching old stats collector
+
+type FrontendTransferRates struct {
+	TxPerMinute         float64 `json:"txPerMinute"`
+	TxPerHour           float64 `json:"txPerHour"`
+	TxPerDay            float64 `json:"txPerDay"`
+	TxPer7Days          float64 `json:"txPer7Days"`
+	TxPer14Days         float64 `json:"txPer14Days"`
+	TxPer30Days         float64 `json:"txPer30Days"`
+	TxPerMinuteChange   float64 `json:"txPerMinuteChange"`
+	TxPerHourChange     float64 `json:"txPerHourChange"`
+	TxPerDayChange      float64 `json:"txPerDayChange"`
+	TxPer7DaysChange    float64 `json:"txPer7DaysChange"`
+	TxPer14DaysChange   float64 `json:"txPer14DaysChange"`
+	TxPer30DaysChange   float64 `json:"txPer30DaysChange"`
+	TotalTracked        int64   `json:"totalTracked"`
+	UniqueSendersTotal  int64   `json:"uniqueSendersTotal"`
+	UniqueReceiversTotal int64   `json:"uniqueReceiversTotal"`
+	DataAvailability    map[string]bool `json:"dataAvailability"`
+	ServerUptimeSeconds float64 `json:"serverUptimeSeconds"`
+}
+
+type FrontendRouteData struct {
+	Route       string  `json:"route"`
+	Count       int64   `json:"count"`
+	FromChain   string  `json:"fromChain"`
+	ToChain     string  `json:"toChain"`
+	FromName    string  `json:"fromName"`
+	ToName      string  `json:"toName"`
+	CountChange float64 `json:"countChange,omitempty"`
+}
+
+type FrontendWalletData struct {
+	Address        string `json:"address"`
+	DisplayAddress string `json:"displayAddress"`
+	Count          int64  `json:"count"`
+	LastActivity   string `json:"lastActivity"`
+}
+
+type FrontendChainFlow struct {
+	UniversalChainID string  `json:"universal_chain_id"`
+	ChainName        string  `json:"chainName"`
+	OutgoingCount    int64   `json:"outgoingCount"`
+	IncomingCount    int64   `json:"incomingCount"`
+	NetFlow          int64   `json:"netFlow"`
+	OutgoingChange   float64 `json:"outgoingChange,omitempty"`
+	IncomingChange   float64 `json:"incomingChange,omitempty"`
+	NetFlowChange    float64 `json:"netFlowChange,omitempty"`
+	LastActivity     string  `json:"lastActivity"`
+	TopAssets        []FrontendChainAsset `json:"topAssets,omitempty"`
+}
+
+type FrontendChainAsset struct {
+	AssetSymbol   string  `json:"assetSymbol"`
+	AssetName     string  `json:"assetName"`
+	OutgoingCount int64   `json:"outgoingCount"`
+	IncomingCount int64   `json:"incomingCount"`
+	NetFlow       int64   `json:"netFlow"`
+	TotalVolume   float64 `json:"totalVolume"`
+	AverageAmount float64 `json:"averageAmount"`
+	Percentage    float64 `json:"percentage"`
+	LastActivity  string  `json:"lastActivity"`
+}
+
+type FrontendAsset struct {
+	AssetSymbol     string              `json:"assetSymbol"`
+	AssetName       string              `json:"assetName"`
+	TransferCount   int64               `json:"transferCount"`
+	TotalVolume     float64             `json:"totalVolume"`
+	LargestTransfer float64             `json:"largestTransfer"`
+	AverageAmount   float64             `json:"averageAmount"`
+	VolumeChange    float64             `json:"volumeChange,omitempty"`
+	CountChange     float64             `json:"countChange,omitempty"`
+	LastActivity    string              `json:"lastActivity"`
+	TopRoutes       []FrontendAssetRoute `json:"topRoutes"`
+}
+
+type FrontendAssetRoute struct {
+	FromChain    string  `json:"fromChain"`
+	ToChain      string  `json:"toChain"`
+	FromName     string  `json:"fromName"`
+	ToName       string  `json:"toName"`
+	Route        string  `json:"route"`
+	Count        int64   `json:"count"`
+	Volume       float64 `json:"volume"`
+	Percentage   float64 `json:"percentage"`
+	LastActivity string  `json:"lastActivity"`
+}
+
+// GetChartDataForFrontend returns complete chart data in frontend-expected format
+// This method ALWAYS returns cached data to ensure fast client connections
+func (c *EnhancedChartService) GetChartDataForFrontend() (map[string]interface{}, error) {
+	now := time.Now()
+	
+	// ALWAYS serve from cache to ensure fast client connections
+	c.chartCacheMu.RLock()
+	if c.cachedChartData != nil {
+		// Return cached data with updated timestamp
+		cachedData := make(map[string]interface{})
+		for k, v := range c.cachedChartData {
+			cachedData[k] = v
+		}
+		cachedData["timestamp"] = now // Update timestamp to current
+		age := now.Sub(c.lastCacheUpdate)
+		c.chartCacheMu.RUnlock()
+		
+		utils.LogDebug("CHART_SERVICE", "✅ Serving cached chart data (age: %v)", age)
+		return cachedData, nil
+	}
+	c.chartCacheMu.RUnlock()
+	
+	// Cache is empty (startup scenario) - build initial cache
+	utils.LogInfo("CHART_SERVICE", "⚠️  Cache empty, building initial cache for startup...")
+	return c.buildChartData(now)
+}
+
+// buildChartData builds chart data from database (used for cache warming)
+func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interface{}, error) {
+	// Get real-time transfer rates
+	transferRates, err := c.getTransferRatesWithChanges(now)
+	if err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to get transfer rates: %v", err)
+		transferRates = FrontendTransferRates{} // Use empty data
+	}
+	
+	// Get pre-computed chart data from summaries
+	popularRoutes, _ := c.getChartSummary("popular_routes", "1m")
+	popularRoutesTimeScale, _ := c.getAllTimeScaleSummaries("popular_routes")
+	
+	activeSenders, _ := c.getChartSummary("active_senders", "1m")
+	activeSendersTimeScale, _ := c.getAllTimeScaleSummaries("active_senders")
+	
+	activeReceivers, _ := c.getChartSummary("active_receivers", "1m")
+	activeReceiversTimeScale, _ := c.getAllTimeScaleSummaries("active_receivers")
+	
+	chainFlows, _ := c.getChartSummary("chain_flows", "1m")
+	chainFlowTimeScale, _ := c.getAllTimeScaleSummaries("chain_flows")
+	
+	assetVolumes, _ := c.getChartSummary("asset_volumes", "1m")
+	assetVolumeTimeScale, _ := c.getAllTimeScaleSummaries("asset_volumes")
+	
+	// Calculate totals for chain flows and asset volumes
+	totalOutgoing, totalIncoming := c.calculateChainTotals(now.Add(-time.Minute))
+	totalAssets, totalVolume, totalTransfers := c.calculateAssetTotals(now.Add(-time.Minute))
+	
+	// Build frontend-compatible response
+	chartData := map[string]interface{}{
+		"currentRates":           transferRates,
+		"activeWalletRates":      c.buildActiveWalletRates(transferRates),
+		"popularRoutes":          popularRoutes,
+		"popularRoutesTimeScale": popularRoutesTimeScale,
+		"activeSenders":          activeSenders,
+		"activeSendersTimeScale": activeSendersTimeScale,
+		"activeReceivers":        activeReceivers,
+		"activeReceiversTimeScale": activeReceiversTimeScale,
+		"chainFlowData": map[string]interface{}{
+			"chains":             chainFlows,
+			"chainFlowTimeScale": chainFlowTimeScale,
+			"totalOutgoing":      totalOutgoing,
+			"totalIncoming":      totalIncoming,
+			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
+		},
+		"assetVolumeData": map[string]interface{}{
+			"assets":              assetVolumes,
+			"assetVolumeTimeScale": assetVolumeTimeScale,
+			"totalAssets":         totalAssets,
+			"totalVolume":         totalVolume,
+			"totalTransfers":      totalTransfers,
+			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
+		},
+		"latencyData":       c.GetLatencyData(),
+		"dataAvailability":  transferRates.DataAvailability,
+		"timestamp":         now,
+	}
+	
+	// Update cache
+	c.chartCacheMu.Lock()
+	c.cachedChartData = chartData
+	c.lastCacheUpdate = now
+	c.chartCacheMu.Unlock()
+	
+	utils.LogInfo("CHART_SERVICE", "📊 Chart data built and cached")
+	return chartData, nil
+}
+
+// Real-time transfer rates with percentage changes
+func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (FrontendTransferRates, error) {
+	// Calculate current period counts
+	rates := FrontendTransferRates{
+		DataAvailability: map[string]bool{
+			"hasMinute": true, "hasHour": true, "hasDay": true,
+			"has7Days": true, "has14Days": true, "has30Days": true,
+		},
+		ServerUptimeSeconds: time.Since(now.Add(-time.Hour)).Seconds(), // Simplified
+	}
+	
+	periods := map[string]time.Duration{
+		"1m":  time.Minute,
+		"1h":  time.Hour,
+		"1d":  24 * time.Hour,
+		"7d":  7 * 24 * time.Hour,
+		"14d": 14 * 24 * time.Hour,
+		"30d": 30 * 24 * time.Hour,
+	}
+	
+	for period, duration := range periods {
+		since := now.Add(-duration)
+		
+		// Current period count
+		var currentCount int64
+		err := c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > ?", since.Unix()).Scan(&currentCount)
+		if err != nil {
+			continue
+		}
+		
+		// Previous period count for percentage change
+		prevSince := since.Add(-duration)
+		prevUntil := since
+		var prevCount int64
+		c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > ? AND timestamp <= ?", 
+			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
+		
+		// Calculate percentage change
+		var change float64
+		if prevCount > 0 {
+			change = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+		}
+		
+		// Assign to appropriate field
+		switch period {
+		case "1m":
+			rates.TxPerMinute = float64(currentCount)
+			rates.TxPerMinuteChange = change
+		case "1h":
+			rates.TxPerHour = float64(currentCount)
+			rates.TxPerHourChange = change
+		case "1d":
+			rates.TxPerDay = float64(currentCount)
+			rates.TxPerDayChange = change
+		case "7d":
+			rates.TxPer7Days = float64(currentCount)
+			rates.TxPer7DaysChange = change
+		case "14d":
+			rates.TxPer14Days = float64(currentCount)
+			rates.TxPer14DaysChange = change
+		case "30d":
+			rates.TxPer30Days = float64(currentCount)
+			rates.TxPer30DaysChange = change
+		}
+	}
+	
+	// Get total count and unique counts (approximate)
+	c.db.QueryRow("SELECT COUNT(*) FROM transfers").Scan(&rates.TotalTracked)
+	c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > ?", 
+		now.Add(-24*time.Hour).Unix()).Scan(&rates.UniqueSendersTotal)
+	c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > ?", 
+		now.Add(-24*time.Hour).Unix()).Scan(&rates.UniqueReceiversTotal)
+	
+	return rates, nil
+}
+
+// Get chart summary from pre-computed data
+func (c *EnhancedChartService) getChartSummary(chartType, timeScale string) (interface{}, error) {
+	var dataJSON string
+	err := c.db.QueryRow(
+		"SELECT data_json FROM chart_summaries WHERE chart_type = ? AND time_scale = ? ORDER BY updated_at DESC LIMIT 1",
+		chartType, timeScale).Scan(&dataJSON)
+	
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return []interface{}{}, nil // Return empty array if no data
+		}
+		return nil, err
+	}
+	
+	var data interface{}
+	if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal chart data: %w", err)
+	}
+	
+	return data, nil
+}
+
+// Get all time scale summaries for a chart type
+func (c *EnhancedChartService) getAllTimeScaleSummaries(chartType string) (map[string]interface{}, error) {
+	rows, err := c.db.Query(
+		"SELECT time_scale, data_json FROM chart_summaries WHERE chart_type = ? ORDER BY updated_at DESC",
+		chartType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	result := make(map[string]interface{})
+	for rows.Next() {
+		var timeScale, dataJSON string
+		if err := rows.Scan(&timeScale, &dataJSON); err != nil {
+			continue
+		}
+		
+		var data interface{}
+		if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
+			continue
+		}
+		
+		result[timeScale] = data
+	}
+	
+	return result, nil
+}
+
+// Helper functions for totals
+func (c *EnhancedChartService) calculateChainTotals(since time.Time) (int64, int64) {
+	var outgoing, incoming int64
+	
+	c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > ?", since.Unix()).Scan(&outgoing)
+	incoming = outgoing // Simplified - each transfer is both outgoing and incoming
+	
+	return outgoing, incoming
+}
+
+func (c *EnhancedChartService) calculateAssetTotals(since time.Time) (int64, float64, int64) {
+	var totalAssets, totalTransfers int64
+	var totalVolume float64
+	
+	// Use canonical_token_symbol for proper wrapping tracking, fallback to token_symbol
+	c.db.QueryRow("SELECT COUNT(DISTINCT COALESCE(NULLIF(canonical_token_symbol, ''), token_symbol)) FROM transfers WHERE timestamp > ? AND COALESCE(NULLIF(canonical_token_symbol, ''), token_symbol) IS NOT NULL", 
+		since.Unix()).Scan(&totalAssets)
+	c.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM transfers WHERE timestamp > ?", 
+		since.Unix()).Scan(&totalTransfers, &totalVolume)
+	
+	return totalAssets, totalVolume, totalTransfers
+}
+
+func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRates) map[string]interface{} {
+	now := time.Now()
+	
+	// Query unique senders and receivers for each time period
+	periods := map[string]time.Duration{
+		"LastMin":  time.Minute,
+		"LastHour": time.Hour,
+		"LastDay":  24 * time.Hour,
+		"Last7d":   7 * 24 * time.Hour,
+		"Last14d":  14 * 24 * time.Hour,
+		"Last30d":  30 * 24 * time.Hour,
+	}
+	
+	result := map[string]interface{}{
+		"dataAvailability":    rates.DataAvailability,
+		"serverUptimeSeconds": rates.ServerUptimeSeconds,
+		"uniqueSendersTotal":  rates.UniqueSendersTotal,
+		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
+	}
+	
+	// Calculate unique total wallets (union of all senders and receivers)
+	var uniqueTotalWallets int64
+	err := c.db.QueryRow(`
+		SELECT COUNT(DISTINCT wallet) FROM (
+			SELECT sender as wallet FROM transfers
+			UNION
+			SELECT receiver as wallet FROM transfers
+		)`).Scan(&uniqueTotalWallets)
+	if err != nil {
+		uniqueTotalWallets = 0
+	}
+	result["uniqueTotalWallets"] = uniqueTotalWallets
+	
+	// Query for each time period
+	for periodName, duration := range periods {
+		since := now.Add(-duration)
+		
+		// Get unique senders count
+		var senderCount int64
+		err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > ?", 
+			since.Unix()).Scan(&senderCount)
+		if err != nil {
+			senderCount = 0
+		}
+		
+		// Get unique receivers count  
+		var receiverCount int64
+		err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > ?", 
+			since.Unix()).Scan(&receiverCount)
+		if err != nil {
+			receiverCount = 0
+		}
+		
+		// Calculate total unique wallets (union of senders and receivers)
+		var totalCount int64
+		err = c.db.QueryRow(`
+			SELECT COUNT(DISTINCT wallet) FROM (
+				SELECT sender as wallet FROM transfers WHERE timestamp > ?
+				UNION
+				SELECT receiver as wallet FROM transfers WHERE timestamp > ?
+			)`, since.Unix(), since.Unix()).Scan(&totalCount)
+		if err != nil {
+			totalCount = 0
+		}
+		
+		// Calculate percentage changes for previous period
+		prevSince := since.Add(-duration)
+		prevUntil := since
+		
+		// Previous period senders
+		var prevSenderCount int64
+		c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > ? AND timestamp <= ?", 
+			prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenderCount)
+		
+		// Previous period receivers
+		var prevReceiverCount int64
+		c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > ? AND timestamp <= ?", 
+			prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceiverCount)
+		
+		// Previous period total wallets
+		var prevTotalCount int64
+		c.db.QueryRow(`
+			SELECT COUNT(DISTINCT wallet) FROM (
+				SELECT sender as wallet FROM transfers WHERE timestamp > ? AND timestamp <= ?
+				UNION
+				SELECT receiver as wallet FROM transfers WHERE timestamp > ? AND timestamp <= ?
+			)`, prevSince.Unix(), prevUntil.Unix(), prevSince.Unix(), prevUntil.Unix()).Scan(&prevTotalCount)
+		
+		// Calculate percentage changes
+		var senderChange, receiverChange, totalChange float64
+		if prevSenderCount > 0 {
+			senderChange = ((float64(senderCount) - float64(prevSenderCount)) / float64(prevSenderCount)) * 100
+		}
+		if prevReceiverCount > 0 {
+			receiverChange = ((float64(receiverCount) - float64(prevReceiverCount)) / float64(prevReceiverCount)) * 100
+		}
+		if prevTotalCount > 0 {
+			totalChange = ((float64(totalCount) - float64(prevTotalCount)) / float64(prevTotalCount)) * 100
+		}
+		
+		// Add to result with frontend-expected field names
+		result["senders"+periodName] = senderCount
+		result["receivers"+periodName] = receiverCount
+		result["total"+periodName] = totalCount
+		
+		// Add percentage changes
+		result["senders"+periodName+"Change"] = senderChange
+		result["receivers"+periodName+"Change"] = receiverChange
+		result["total"+periodName+"Change"] = totalChange
+	}
+	
+	return result
+}
+
+// SetLatencyData updates the stored latency data (called by latency callback)
+func (c *EnhancedChartService) SetLatencyData(data []models.LatencyData) {
+	c.latencyMu.Lock()
+	defer c.latencyMu.Unlock()
+	
+	// Store in memory for immediate access
+	c.latencyData = data
+	
+	// Store in database for persistence
+	if err := c.storeLatencyDataInDB(data); err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to store latency data in database: %v", err)
+	}
+	
+	utils.LogDebug("CHART_SERVICE", "Updated latency data with %d chain pairs", len(data))
+}
+
+// storeLatencyDataInDB stores latency data in the database
+func (c *EnhancedChartService) storeLatencyDataInDB(data []models.LatencyData) error {
+	if len(data) == 0 {
+		return nil
+	}
+	
+	// Prepare insert statement
+	insertSQL := `
+		INSERT OR REPLACE INTO latency_data (
+			source_chain, dest_chain, source_name, dest_name,
+			packet_ack_p5, packet_ack_median, packet_ack_p95,
+			packet_recv_p5, packet_recv_median, packet_recv_p95,
+			write_ack_p5, write_ack_median, write_ack_p95,
+			fetched_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	
+	stmt, err := c.db.Prepare(insertSQL)
+	if err != nil {
+		return fmt.Errorf("failed to prepare latency insert statement: %w", err)
+	}
+	defer stmt.Close()
+	
+	now := time.Now().Unix()
+	successCount := 0
+	
+	for _, latency := range data {
+		_, err := stmt.Exec(
+			latency.SourceChain, latency.DestinationChain,
+			latency.SourceName, latency.DestinationName,
+			latency.PacketAck.P5, latency.PacketAck.Median, latency.PacketAck.P95,
+			latency.PacketRecv.P5, latency.PacketRecv.Median, latency.PacketRecv.P95,
+			latency.WriteAck.P5, latency.WriteAck.Median, latency.WriteAck.P95,
+			now, now,
+		)
+		
+		if err != nil {
+			utils.LogError("CHART_SERVICE", "Failed to store latency for %s->%s: %v", 
+				latency.SourceName, latency.DestinationName, err)
+		} else {
+			successCount++
+		}
+	}
+	
+	utils.LogInfo("CHART_SERVICE", "Stored %d/%d latency records in database", successCount, len(data))
+	return nil
+}
+
+// GetLatencyDataFromDB retrieves the latest latency data from database
+func (c *EnhancedChartService) GetLatencyDataFromDB() ([]models.LatencyData, error) {
+	query := `
+		SELECT DISTINCT 
+			l1.source_chain, l1.dest_chain, l1.source_name, l1.dest_name,
+			l1.packet_ack_p5, l1.packet_ack_median, l1.packet_ack_p95,
+			l1.packet_recv_p5, l1.packet_recv_median, l1.packet_recv_p95,
+			l1.write_ack_p5, l1.write_ack_median, l1.write_ack_p95
+		FROM latency_data l1
+		INNER JOIN (
+			SELECT source_chain, dest_chain, MAX(fetched_at) as max_fetched
+			FROM latency_data 
+			GROUP BY source_chain, dest_chain
+		) l2 ON l1.source_chain = l2.source_chain 
+			AND l1.dest_chain = l2.dest_chain 
+			AND l1.fetched_at = l2.max_fetched
+		ORDER BY l1.source_name, l1.dest_name`
+	
+	rows, err := c.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query latency data: %w", err)
+	}
+	defer rows.Close()
+	
+	var latencyData []models.LatencyData
+	for rows.Next() {
+		var latency models.LatencyData
+		
+		err := rows.Scan(
+			&latency.SourceChain, &latency.DestinationChain,
+			&latency.SourceName, &latency.DestinationName,
+			&latency.PacketAck.P5, &latency.PacketAck.Median, &latency.PacketAck.P95,
+			&latency.PacketRecv.P5, &latency.PacketRecv.Median, &latency.PacketRecv.P95,
+			&latency.WriteAck.P5, &latency.WriteAck.Median, &latency.WriteAck.P95,
+		)
+		
+		if err != nil {
+			utils.LogError("CHART_SERVICE", "Failed to scan latency row: %v", err)
+			continue
+		}
+		
+		latencyData = append(latencyData, latency)
+	}
+	
+	return latencyData, nil
+}
+
+// LoadLatencyDataFromDB loads latency data from database into memory on startup
+func (c *EnhancedChartService) LoadLatencyDataFromDB() error {
+	latencyData, err := c.GetLatencyDataFromDB()
+	if err != nil {
+		return err
+	}
+	
+	c.latencyMu.Lock()
+	c.latencyData = latencyData
+	c.latencyMu.Unlock()
+	
+	utils.LogInfo("CHART_SERVICE", "Loaded %d latency records from database", len(latencyData))
+	return nil
+}
+
+// GetLatencyData returns the current latency data
+func (c *EnhancedChartService) GetLatencyData() []models.LatencyData {
+	c.latencyMu.RLock()
+	defer c.latencyMu.RUnlock()
+	
+	// Return a copy to prevent external modifications
+	result := make([]models.LatencyData, len(c.latencyData))
+	copy(result, c.latencyData)
+	return result
+}
+
+// InvalidateCache forces the chart data cache to be regenerated on next access
+func (c *EnhancedChartService) InvalidateCache() {
+	c.chartCacheMu.Lock()
+	defer c.chartCacheMu.Unlock()
+	
+	c.cachedChartData = nil
+	c.lastCacheUpdate = time.Time{} // Zero time
+	utils.LogDebug("CHART_SERVICE", "Chart data cache invalidated")
+}
+
+// RefreshCache proactively warms the cache with fresh data
+func (c *EnhancedChartService) RefreshCache() error {
+	utils.LogDebug("CHART_SERVICE", "🔥 Proactively warming chart data cache...")
+	_, err := c.buildChartData(time.Now())
+	return err
+}
+
+// GetCacheStats returns cache performance statistics
+func (c *EnhancedChartService) GetCacheStats() map[string]interface{} {
+	c.chartCacheMu.RLock()
+	defer c.chartCacheMu.RUnlock()
+	
+	stats := map[string]interface{}{
+		"cacheStrategy":   "always_serve_cached",
+		"hasCachedData":   c.cachedChartData != nil,
+		"lastUpdate":      c.lastCacheUpdate.Format(time.RFC3339),
+		"updateInterval":  "15s", // Background update frequency
+	}
+	
+	if !c.lastCacheUpdate.IsZero() {
+		age := time.Since(c.lastCacheUpdate)
+		stats["cacheAge"] = age.String()
+		stats["nextUpdateIn"] = (15*time.Second - (age % (15*time.Second))).String()
+	} else {
+		stats["cacheAge"] = "never"
+		stats["nextUpdateIn"] = "pending_first_update"
+	}
+	
+	return stats
+} 

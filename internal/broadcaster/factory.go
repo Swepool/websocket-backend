@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/stats"
 )
 
 // BroadcasterInterface defines the common interface for all broadcaster implementations
@@ -14,14 +13,16 @@ type BroadcasterInterface interface {
 	GetClientCount() int
 	GetType() string
 	GetShardStats() map[string]interface{}
+	BroadcastChartData(data interface{})
+	SetChartService(chartService interface{})
 }
 
 
 
 // CreateBroadcaster creates a sharded broadcaster with enhanced management
-func CreateBroadcaster(config Config, channels *channels.Channels, statsCollector *stats.Collector) BroadcasterInterface {
+func CreateBroadcaster(config Config, channels *channels.Channels) BroadcasterInterface {
 	// Always create sharded broadcaster
-	return NewBroadcaster(config, channels, statsCollector)
+	return NewBroadcaster(config, channels)
 }
 
 // GetRecommendedConfig returns optimized config based on expected load

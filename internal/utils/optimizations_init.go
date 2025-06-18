@@ -22,9 +22,6 @@ func InitializeOptimizations() {
 	// Set up memory optimization based on available memory
 	setupMemoryOptimizations()
 	
-	// Initialize HLL pool
-	GetGlobalHLLPool()
-	
 	// Set up runtime optimizations
 	setupRuntimeOptimizations()
 }
@@ -72,10 +69,10 @@ func GetOptimizationEnvironmentVariables() map[string]string {
 		// Channel buffer configuration
 		"CHANNEL_BUFFER_MULTIPLIER":     "2.0",    // Double default buffer sizes
 		"RAW_TRANSFERS_BUFFER":          "5000",   // Raw transfers buffer
-		"ENHANCED_TRANSFERS_BUFFER":     "5000",   // Enhanced transfers buffer
+		"PROCESSED_TRANSFERS_BUFFER":    "5000",   // Processed transfers buffer
 		"TRANSFER_BROADCASTS_BUFFER":    "50000",  // Transfer broadcasts buffer
-		"STATS_UPDATES_BUFFER":          "50000",  // Stats updates buffer
-		"CHART_UPDATES_BUFFER":          "10000",  // Chart updates buffer
+		"DATABASE_SAVES_BUFFER":         "10000",  // Database saves buffer
+		"CHART_UPDATES_BUFFER":          "5000",   // Chart updates buffer
 		
 		// Logging configuration
 		"LOG_LEVEL":                     "WARN",   // Reduce log noise in production
@@ -91,7 +88,7 @@ func GetOptimizationEnvironmentVariables() map[string]string {
 	}
 }
 
-// PrintOptimizationStatus prints the current optimization status
+// PrintOptimizationStatus prints the current optimization status for simplified architecture
 func PrintOptimizationStatus() {
 	BroadcasterLogger.Info("=== Performance Optimizations Status ===")
 	
@@ -108,10 +105,10 @@ func PrintOptimizationStatus() {
 	BroadcasterLogger.Info("✓ Added pre-marshaled static content")
 	BroadcasterLogger.Info("✓ Optimized JSON marshaling")
 	
-	// Memory optimization status
-	BroadcasterLogger.Info("✓ Implemented HLL memory pool")
-	BroadcasterLogger.Info("✓ Added memory pressure monitoring")
-	BroadcasterLogger.Info("✓ Enabled incremental stats computation")
+	// Database optimization status
+	BroadcasterLogger.Info("✓ SQLite optimized with WAL mode and indexes")
+	BroadcasterLogger.Info("✓ Database-driven chart computation")
+	BroadcasterLogger.Info("✓ Simplified in-memory data structures")
 	
 	// Logging optimization status
 	BroadcasterLogger.Info("✓ Implemented structured logging with levels")
@@ -123,28 +120,12 @@ func PrintOptimizationStatus() {
 		memStats.Pressure.String(), 
 		float64(memStats.HeapAlloc)/(1024*1024))
 	
-	// HLL pool status
-	hllStats := GetGlobalHLLPool().GetStats()
-	BroadcasterLogger.Info("HLL Pool: %d created, %d reused, %d in use", 
-		hllStats.TotalCreated, 
-		hllStats.TotalReused, 
-		hllStats.CurrentInUse)
-	
 	BroadcasterLogger.Info("=== All optimizations are active ===")
 }
 
 // ValidateOptimizations checks that all optimizations are working correctly
 func ValidateOptimizations() bool {
 	allValid := true
-	
-	// Test HLL pool
-	hll := GetHLL14()
-	hll.Insert([]byte("test"))
-	if hll.EstimateCount() == 0 {
-		Error("HLL pool validation failed")
-		allValid = false
-	}
-	hll.Release()
 	
 	// Test memory monitor
 	pressure := CheckMemoryPressure()
@@ -181,7 +162,6 @@ func ValidateOptimizations() bool {
 func GetOptimizationSummary() map[string]interface{} {
 	return map[string]interface{}{
 		"memory":     GetMemoryStats(),
-		"hll_pool":   GetGlobalHLLPool().GetStats(),
 		"batch_logger": GetBatchLogger().GetStats(),
 		"runtime": map[string]interface{}{
 			"gomaxprocs": runtime.GOMAXPROCS(0),

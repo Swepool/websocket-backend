@@ -13,7 +13,7 @@ import (
 	"websocket-backend-new/internal/channels"
 	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
-	"websocket-backend-new/internal/stats"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -83,21 +83,19 @@ type ShardWorker struct {
 type Broadcaster struct {
 	config         Config
 	channels       *channels.Channels
-	statsCollector *stats.Collector
 	shards         []*Shard
 	upgrader       websocket.Upgrader
 	totalClients   int64
 	mu             sync.RWMutex
 	shutdownOnce   sync.Once
-	chartFetching  int32 // atomic flag to prevent concurrent chart fetches
+	chartService   interface{} // Chart service for initial data (will be set by coordinator)
 }
 
 // NewBroadcaster creates a new sharded broadcaster
-func NewBroadcaster(config Config, channels *channels.Channels, statsCollector *stats.Collector) *Broadcaster {
+func NewBroadcaster(config Config, channels *channels.Channels) *Broadcaster {
 	sb := &Broadcaster{
 		config:         config,
 		channels:       channels,
-		statsCollector: statsCollector,
 		shards:         make([]*Shard, config.NumShards),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -111,7 +109,7 @@ func NewBroadcaster(config Config, channels *channels.Channels, statsCollector *
 	// Initialize shards with enhanced settings
 	for i := 0; i < config.NumShards; i++ {
 		sb.shards[i] = newShard(i, config)
-		// Set callback for new client connections
+		// Set callback to send initial chart data
 		sb.shards[i].onClientConnect = sb.sendInitialChartData
 	}
 
@@ -164,13 +162,7 @@ func (sb *Broadcaster) Start(ctx context.Context) {
 		utils.LogInfo("SHARDED_BROADCASTER", "Started shard %d with %d workers", i, sb.config.WorkersPerShard)
 	}
 
-	// Create a ticker for periodic chart updates
-	chartTicker := time.NewTicker(15 * time.Second)
-	
-	defer func() {
-		chartTicker.Stop()
-		sb.shutdown()
-	}()
+	defer sb.shutdown()
 
 	for {
 		select {
@@ -183,9 +175,6 @@ func (sb *Broadcaster) Start(ctx context.Context) {
 
 		case chartData := <-sb.channels.ChartUpdates:
 			sb.broadcastChartData(chartData)
-
-		case <-chartTicker.C:
-			sb.sendPeriodicChartUpdate()
 		}
 	}
 }
@@ -470,7 +459,7 @@ func (s *Shard) handleClientRegistration(client *Client) {
 	go client.writePump(s.unregister)
 	go client.readPump(s.unregister)
 	
-	// Call callback for new client connection (send initial chart data)
+	// Send initial chart data if callback is set
 	if s.onClientConnect != nil {
 		go s.onClientConnect(client)
 	}
@@ -579,56 +568,8 @@ func (sb *Broadcaster) broadcastChartData(rawData interface{}) {
 	}
 }
 
-// sendPeriodicChartUpdate sends periodic chart updates ONLY when meaningful data exists
-func (sb *Broadcaster) sendPeriodicChartUpdate() {
-	// Always fetch chart data to keep stats fresh, even with no clients
-	// Check if we're already fetching chart data to prevent concurrent fetches
-	if !atomic.CompareAndSwapInt32(&sb.chartFetching, 0, 1) {
-		utils.LogDebug("SHARDED_BROADCASTER", "Chart data fetch already in progress, skipping")
-		return
-	}
-	
-	// Run chart data fetching in a separate goroutine to avoid blocking the main loop
-	go func() {
-		defer func() {
-			atomic.StoreInt32(&sb.chartFetching, 0) // Reset the flag
-			if r := recover(); r != nil {
-				utils.LogError("SHARDED_BROADCASTER", "Panic in sendPeriodicChartUpdate: %v", r)
-			}
-		}()
-		
-		clientCount := sb.GetClientCount()
-		utils.LogDebug("SHARDED_BROADCASTER", "Fetching periodic chart data for %d clients", clientCount)
-		
-		// Fetch chart data with timeout
-		chartDataChan := make(chan interface{}, 1)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					utils.LogError("SHARDED_BROADCASTER", "Panic in periodic chart data fetch: %v", r)
-				}
-			}()
-			chartData := sb.statsCollector.GetChartDataForFrontend()
-			select {
-			case chartDataChan <- chartData:
-			default:
-			}
-		}()
-		
-		var chartData interface{}
-		select {
-		case chartData = <-chartDataChan:
-			if clientCount > 0 {
-				utils.LogDebug("SHARDED_BROADCASTER", "Broadcasting chart data to all clients")
-				sb.broadcastChartData(chartData)
-			} else {
-				utils.LogDebug("SHARDED_BROADCASTER", "Chart data refreshed but no clients connected")
-			}
-		case <-time.After(3 * time.Second):
-			utils.LogWarn("SHARDED_BROADCASTER", "Timeout fetching periodic chart data")
-		}
-	}()
-}
+// Note: Periodic chart updates have been removed in the simplified database-driven architecture.
+// Chart data is now available via HTTP API endpoints using database queries.
 
 // UpgradeConnection upgrades HTTP connection to WebSocket and assigns to appropriate shard with enhanced settings
 func (sb *Broadcaster) UpgradeConnection(w http.ResponseWriter, r *http.Request) {
@@ -820,49 +761,78 @@ func generateClientID() string {
 	return hex.EncodeToString(bytes)
 }
 
-// sendInitialChartData sends immediate chart data to a newly connected client
+// Note: Initial chart data sending has been removed in the simplified database-driven architecture.
+// Clients can fetch chart data via HTTP API endpoints after connecting.
+
+// BroadcastChartData broadcasts chart data to all shards (public interface method)
+func (sb *Broadcaster) BroadcastChartData(data interface{}) {
+	sb.broadcastChartData(data)
+}
+
+// SetChartService sets the chart service for sending initial chart data
+func (sb *Broadcaster) SetChartService(chartService interface{}) {
+	sb.chartService = chartService
+}
+
+// sendInitialChartData sends initial chart data to a newly connected client
 func (sb *Broadcaster) sendInitialChartData(client *Client) {
+	// Prevent panic by deferring recovery
 	defer func() {
 		if r := recover(); r != nil {
-			utils.LogError("SHARDED_BROADCASTER", "Panic sending initial chart data to client %s: %v", client.id, r)
+			utils.LogWarn("SHARDED_BROADCASTER", "Recovered from panic in sendInitialChartData for client %s: %v", client.id, r)
 		}
 	}()
+
+	if sb.chartService == nil {
+		utils.LogDebug("SHARDED_BROADCASTER", "No chart service available for initial data")
+		return
+	}
 	
-	utils.LogDebug("SHARDED_BROADCASTER", "Sending initial chart data to client %s", client.id)
+	// Check if client is still connected before proceeding (thread-safe)
+	client.closeMu.Lock()
+	isClosing := client.isClosing
+	client.closeMu.Unlock()
 	
-	// Get chart data with timeout
-	chartDataChan := make(chan interface{}, 1)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				utils.LogError("SHARDED_BROADCASTER", "Panic fetching initial chart data: %v", r)
-			}
-		}()
-		chartData := sb.statsCollector.GetChartDataForFrontend()
-		select {
-		case chartDataChan <- chartData:
-		default:
+	if isClosing {
+		utils.LogDebug("SHARDED_BROADCASTER", "Client %s is closing, skipping initial chart data", client.id)
+		return
+	}
+	
+	// Type assert to get the chart service interface
+	if chartService, ok := sb.chartService.(interface{ GetChartDataForFrontend() (map[string]interface{}, error) }); ok {
+		chartData, err := chartService.GetChartDataForFrontend()
+		if err != nil {
+			utils.LogError("SHARDED_BROADCASTER", "Failed to get initial chart data for client %s: %v", client.id, err)
+			return
 		}
-	}()
-	
-	// Send chart data to the specific client
-	select {
-	case chartData := <-chartDataChan:
+		
+		// Marshal chart data with the same format as regular broadcasts
 		data, err := utils.DefaultMarshalChart(chartData)
 		if err != nil {
 			utils.LogError("SHARDED_BROADCASTER", "Failed to marshal initial chart data for client %s: %v", client.id, err)
 			return
 		}
 		
-		// Send to the specific client with timeout
-		select {
-		case client.send <- data:
-			utils.LogDebug("SHARDED_BROADCASTER", "Sent initial chart data to client %s", client.id)
-		case <-time.After(1 * time.Second):
-			utils.LogWarn("SHARDED_BROADCASTER", "Timeout sending initial chart data to client %s", client.id)
+		// Check again if client is still connected before sending (thread-safe)
+		client.closeMu.Lock()
+		isClosing = client.isClosing
+		client.closeMu.Unlock()
+		
+		if isClosing {
+			utils.LogDebug("SHARDED_BROADCASTER", "Client %s closed while preparing chart data", client.id)
+			return
 		}
 		
-	case <-time.After(2 * time.Second):
-		utils.LogWarn("SHARDED_BROADCASTER", "Timeout fetching initial chart data for client %s", client.id)
+		// Send directly to the specific client with timeout to prevent hanging
+		select {
+		case client.send <- data:
+			utils.LogInfo("SHARDED_BROADCASTER", "Sent initial chart data to client %s", client.id)
+		case <-time.After(100 * time.Millisecond):
+			utils.LogWarn("SHARDED_BROADCASTER", "Timeout sending initial chart data to client %s", client.id)
+		default:
+			utils.LogWarn("SHARDED_BROADCASTER", "Client %s channel full, couldn't send initial chart data", client.id)
+		}
+	} else {
+		utils.LogWarn("SHARDED_BROADCASTER", "Chart service doesn't implement required interface")
 	}
 } 
