@@ -2,11 +2,11 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
 	"websocket-backend-new/internal/channels"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
 
@@ -52,7 +52,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 			return
 			
 		case transfers := <-s.channels.EnhancedTransfers:
-			fmt.Printf("[SCHEDULER] Received %d enhanced transfers from enhancer\n", len(transfers))
+			utils.LogInfo("SCHEDULER", "Received %d enhanced transfers from enhancer", len(transfers))
 			s.processTransferBatch(transfers)
 		}
 	}
@@ -84,12 +84,15 @@ func (s *Scheduler) sendTransferWithTiming(transfer models.Transfer) {
 	// Apply timing
 	time.Sleep(totalDelay)
 	
-	// Send to broadcaster (stats are handled by enhancer at true fetch rate)
-	select {
-	case s.channels.TransferBroadcasts <- transfer:
-		fmt.Printf("[SCHEDULER] Sent transfer %s to broadcaster\n", transfer.PacketHash)
-	default:
-		fmt.Printf("[SCHEDULER] Warning: broadcaster channel full, dropping transfer %s\n", transfer.PacketHash)
+	// Send to broadcaster with backpressure protection
+	config := utils.DefaultBackpressureConfig()
+	config.TimeoutMs = 50      // Quick timeout for scheduled sends
+	config.DropOnOverflow = true  // Can drop scheduled transfers under extreme load
+	
+	if utils.SendWithBackpressure(s.channels.TransferBroadcasts, transfer, config, nil) {
+		utils.LogDebug("SCHEDULER", "Sent transfer %s to broadcaster", transfer.PacketHash)
+	} else {
+		utils.LogWarn("SCHEDULER", "Failed to send transfer %s to broadcaster (channel busy)", transfer.PacketHash)
 	}
 	
 	s.mu.Lock()

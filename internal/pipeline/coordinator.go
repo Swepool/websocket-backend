@@ -11,6 +11,7 @@ import (
 	"websocket-backend-new/internal/scheduler"
 	"websocket-backend-new/internal/broadcaster"
 	"websocket-backend-new/internal/stats"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
 
@@ -50,6 +51,8 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 	
 	e := enhancer.NewEnhancer(config.Enhancer, ch)
 	s := scheduler.NewScheduler(config.Scheduler, ch)
+	
+	// Create broadcaster with built-in optimizations
 	b := broadcaster.CreateBroadcaster(config.Broadcaster, ch, statsCollector)
 	
 	return &Coordinator{
@@ -64,20 +67,20 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 
 // Start begins all pipeline threads
 func (c *Coordinator) Start(ctx context.Context) error {
-	fmt.Printf("Starting pipeline coordinator...\n")
+	utils.LogInfo("COORDINATOR", "Starting pipeline coordinator")
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 	
 	// Start all threads concurrently
 	c.wg.Add(5)
-	fmt.Printf("Starting 5 pipeline threads...\n")
+	utils.LogInfo("COORDINATOR", "Starting 5 pipeline threads")
 	
 	// Thread 1: Fetcher
 	go func() {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("Fetcher panic recovered: %v\n", r)
+				utils.LogError("COORDINATOR", "Fetcher panic recovered: %v", r)
 			}
 		}()
 		c.fetcher.Start(ctx)
@@ -88,7 +91,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("Enhancer panic recovered: %v\n", r)
+				utils.LogError("COORDINATOR", "Enhancer panic recovered: %v", r)
 			}
 		}()
 		c.enhancer.Start(ctx)
@@ -99,7 +102,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("Scheduler panic recovered: %v\n", r)
+				utils.LogError("COORDINATOR", "Scheduler panic recovered: %v", r)
 			}
 		}()
 		c.scheduler.Start(ctx)
@@ -110,7 +113,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("Stats panic recovered: %v\n", r)
+				utils.LogError("COORDINATOR", "Stats panic recovered: %v", r)
 			}
 		}()
 		c.runStatsCollector(ctx)
@@ -121,13 +124,13 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("Broadcaster panic recovered: %v\n", r)
+				utils.LogError("COORDINATOR", "Broadcaster panic recovered: %v", r)
 			}
 		}()
 		c.broadcaster.Start(ctx)
 	}()
 	
-	fmt.Printf("All pipeline threads started successfully\n")
+	utils.LogInfo("COORDINATOR", "All pipeline threads started successfully")
 	return nil
 }
 
@@ -153,7 +156,7 @@ func (c *Coordinator) runStatsCollector(ctx context.Context) {
 func (c *Coordinator) processTransferForStats(transfer models.Transfer) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Error processing transfer %s: %v\n", transfer.PacketHash, r)
+			utils.LogError("COORDINATOR", "Error processing transfer %s: %v", transfer.PacketHash, r)
 		}
 	}()
 	
@@ -165,7 +168,7 @@ func (c *Coordinator) processTransferForStats(transfer models.Transfer) {
 func (c *Coordinator) logStatsHealth() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Error getting health info: %v\n", r)
+			utils.LogError("COORDINATOR", "Error getting health info: %v", r)
 		}
 	}()
 	

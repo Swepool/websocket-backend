@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 	"websocket-backend-new/internal/channels"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
 
@@ -91,13 +92,18 @@ func (f *Fetcher) fetchAndSend() {
 	}
 	
 	if len(transfers) > 0 {
-		fmt.Printf("[FETCHER] Generated %d transfers, sending to enhancer\n", len(transfers))
-		// Send raw transfers to enhancer for processing
-		select {
-		case f.channels.RawTransfers <- transfers:
-			fmt.Printf("[FETCHER] Successfully sent %d transfers to enhancer\n", len(transfers))
-		default:
-			fmt.Printf("[FETCHER] Warning: enhancer channel full, dropping %d transfers\n", len(transfers))
+		// Use batch logger for high-frequency events
+		utils.BatchInfo("FETCHER", fmt.Sprintf("Generated %d transfers, sending to enhancer", len(transfers)))
+		
+		// Send with backpressure protection
+		backpressureConfig := utils.DefaultBackpressureConfig()
+		backpressureConfig.DropOnOverflow = false // Don't drop transfers, they're valuable
+		backpressureConfig.TimeoutMs = 200       // 200ms timeout for transfers
+		
+		if utils.SendWithBackpressure(f.channels.RawTransfers, transfers, backpressureConfig, nil) {
+			utils.BatchInfo("FETCHER", fmt.Sprintf("Successfully sent %d transfers to enhancer", len(transfers)))
+		} else {
+			utils.BatchError("FETCHER", fmt.Sprintf("Failed to send %d transfers to enhancer (timeout/overflow)", len(transfers)))
 		}
 	}
 }
@@ -106,9 +112,9 @@ func (f *Fetcher) fetchAndSend() {
 func (f *Fetcher) generateMockTransfers() []models.Transfer {
 	// Get real chains from the chain provider
 	availableChains := f.chainProvider.GetAllChains()
-	fmt.Printf("[FETCHER] Available chains for mock data: %d\n", len(availableChains))
+	utils.LogInfo("FETCHER", "Available chains for mock data: %d", len(availableChains))
 	if len(availableChains) < 2 {
-		fmt.Printf("[FETCHER] Not enough chains available (%d), skipping mock generation\n", len(availableChains))
+		utils.LogWarn("FETCHER", "Not enough chains available (%d), skipping mock generation", len(availableChains))
 		return []models.Transfer{}
 	}
 	

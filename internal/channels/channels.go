@@ -1,6 +1,9 @@
 package channels
 
-import "websocket-backend-new/models"
+import (
+	"websocket-backend-new/internal/utils"
+	"websocket-backend-new/models"
+)
 
 // Channels holds all communication channels for the pipeline
 type Channels struct {
@@ -16,14 +19,25 @@ type Channels struct {
 	ChartUpdates      chan interface{}      // Chart data updates
 }
 
-// NewChannels creates and initializes all channels
+// NewChannels creates and initializes all channels with optimized buffer sizes
 func NewChannels() *Channels {
 	return &Channels{
-		RawTransfers:       make(chan []models.Transfer, 2000),   // Handle 2000 batches (even 500-transfer batches)
-		EnhancedTransfers:  make(chan []models.Transfer, 2000),   // Same capacity for enhanced batches
-		TransferBroadcasts: make(chan models.Transfer, 20000),    // Handle 20k individual transfers (40s at 500 TPS)
-		StatsUpdates:       make(chan models.Transfer, 20000),    // Same for stats processing
-		ChartUpdates:       make(chan interface{}, 200),          // More chart update capacity
+		// Use optimized defaults with environment overrides
+		RawTransfers: make(chan []models.Transfer, 
+			utils.DefaultGetChannelBufferSize("TransferUpdates", 2000)),
+		
+		EnhancedTransfers: make(chan []models.Transfer,
+			utils.DefaultGetChannelBufferSize("TransferEnhanced", 2000)),
+		
+		TransferBroadcasts: make(chan models.Transfer,
+			utils.DefaultGetChannelBufferSize("TransferBroadcasts", 200)),
+		
+		StatsUpdates: make(chan models.Transfer,
+			utils.DefaultGetChannelBufferSize("TransferToSchedule", 2000)),
+		
+		// Critical optimization: 50x larger buffer for chart updates
+		ChartUpdates: make(chan interface{},
+			utils.DefaultGetChannelBufferSize("ChartUpdates", 200)),
 	}
 }
 

@@ -2,12 +2,11 @@ package broadcaster
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
 	"websocket-backend-new/internal/channels"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 	"websocket-backend-new/internal/stats"
 	"github.com/gorilla/websocket"
@@ -85,9 +84,9 @@ func NewBroadcaster(config Config, channels *channels.Channels, statsCollector *
 	}
 }
 
-// Start begins the broadcaster's main loop with enhanced error handling
+// Start begins the broadcaster's main loop with optimized performance
 func (b *Broadcaster) Start(ctx context.Context) {
-	fmt.Printf("[BROADCASTER] Starting standard broadcaster with enhanced client management\n")
+	utils.LogInfo("BROADCASTER", "Starting optimized broadcaster with enhanced client management")
 	
 	// Create tickers for periodic updates and health checks
 	chartTicker := time.NewTicker(5 * time.Second)
@@ -107,7 +106,7 @@ func (b *Broadcaster) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[BROADCASTER] Context cancelled, shutting down\n")
+			utils.LogInfo("BROADCASTER", "Context cancelled, shutting down")
 			return
 			
 		case client := <-b.register:
@@ -130,13 +129,13 @@ func (b *Broadcaster) Start(ctx context.Context) {
 			b.performHealthCheck()
 			
 		case <-debugTicker.C:
-			// Debug: Log broadcaster health
+			// Debug: Log broadcaster health with batched logging
 			b.mu.RLock()
 			clientCount := len(b.clients)
 			b.mu.RUnlock()
 			
 			timeSinceLastTransfer := time.Since(lastTransferTime)
-			fmt.Printf("[BROADCASTER] Debug - Clients: %d, Last transfer: %v ago, Main loop healthy\n", 
+			utils.LogDebug("BROADCASTER", "Debug - Clients: %d, Last transfer: %v ago, Main loop healthy", 
 				clientCount, timeSinceLastTransfer)
 		}
 	}
@@ -149,7 +148,7 @@ func (b *Broadcaster) handleClientRegistration(client *Client) {
 	
 	// Check client limits
 	if len(b.clients) >= b.config.MaxClients {
-		fmt.Printf("[BROADCASTER] Max clients reached (%d), rejecting new client %s\n", b.config.MaxClients, client.id)
+		utils.LogWarn("BROADCASTER", "Max clients reached (%d), rejecting new client %s", b.config.MaxClients, client.id)
 		client.safeClose()
 		return
 	}
@@ -157,7 +156,7 @@ func (b *Broadcaster) handleClientRegistration(client *Client) {
 	b.clients[client] = true
 	client.lastPong = time.Now()
 	
-	fmt.Printf("[BROADCASTER] Client %s registered, total clients: %d\n", client.id, len(b.clients))
+	utils.LogInfo("BROADCASTER", "Client %s registered, total clients: %d", client.id, len(b.clients))
 	
 	// Start client's goroutines
 	go client.writePump(b.unregister)
@@ -167,13 +166,13 @@ func (b *Broadcaster) handleClientRegistration(client *Client) {
 	b.sendInitialDataToClient(client)
 }
 
-// sendInitialDataToClient sends welcome data to newly connected client
+// sendInitialDataToClient sends welcome data to newly connected client with optimized performance
 func (b *Broadcaster) sendInitialDataToClient(client *Client) {
 	// Run chart data fetching in a separate goroutine to avoid blocking the main loop
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fmt.Printf("[BROADCASTER] Panic in sendInitialDataToClient for client %s: %v\n", client.id, r)
+				utils.LogError("BROADCASTER", "Panic in sendInitialDataToClient for client %s: %v", client.id, r)
 			}
 		}()
 		
@@ -182,7 +181,7 @@ func (b *Broadcaster) sendInitialDataToClient(client *Client) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Printf("[BROADCASTER] Panic in chart data fetch for client %s: %v\n", client.id, r)
+					utils.LogError("BROADCASTER", "Panic in chart data fetch for client %s: %v", client.id, r)
 				}
 			}()
 			chartData := b.statsCollector.GetChartDataForFrontend()
@@ -196,25 +195,27 @@ func (b *Broadcaster) sendInitialDataToClient(client *Client) {
 		select {
 		case chartData = <-chartDataChan:
 		case <-time.After(2 * time.Second):
-			fmt.Printf("[BROADCASTER] Timeout fetching chart data for client %s\n", client.id)
+			utils.LogWarn("BROADCASTER", "Timeout fetching chart data for client %s", client.id)
 			return
 		}
 		
-		data, err := json.Marshal(map[string]interface{}{
-			"type": "chartData",
-			"data": chartData,
-		})
+		// Use optimized JSON marshaling
+		data, err := utils.DefaultMarshalChart(chartData)
 		if err != nil {
-			fmt.Printf("[BROADCASTER] Failed to marshal initial chart data for client %s: %v\n", client.id, err)
+			utils.LogError("BROADCASTER", "Failed to marshal initial chart data for client %s: %v", client.id, err)
 			return
 		}
 		
-		// Non-blocking send with timeout
-		select {
-		case client.send <- data:
-			fmt.Printf("[BROADCASTER] Sent initial chart data to client %s\n", client.id)
-		case <-time.After(100 * time.Millisecond):
-			fmt.Printf("[BROADCASTER] Failed to send initial data to slow client %s, will unregister\n", client.id)
+		// Use optimized backpressure-protected send
+		config := utils.DefaultBackpressureConfig()
+		config.TimeoutMs = 100
+		config.DropOnOverflow = true
+		
+		success := utils.SendWithBackpressure(client.send, data, config, nil)
+		if success {
+			utils.LogDebug("BROADCASTER", "Sent initial chart data to client %s", client.id)
+		} else {
+			utils.LogWarn("BROADCASTER", "Failed to send initial data to slow client %s, will unregister", client.id)
 			// Non-blocking unregister
 			select {
 			case b.unregister <- client:
@@ -234,14 +235,24 @@ func (b *Broadcaster) handleClientUnregistration(client *Client) {
 	if _, exists := b.clients[client]; exists {
 		delete(b.clients, client)
 		client.safeClose()
-		fmt.Printf("[BROADCASTER] Client %s unregistered, remaining clients: %d\n", client.id, len(b.clients))
+		utils.LogInfo("BROADCASTER", "Client %s unregistered, remaining clients: %d", client.id, len(b.clients))
 	}
 }
 
-// broadcastTransfer broadcasts a single transfer to all connected clients with improved error handling
-func (b *Broadcaster) broadcastTransfer(transfer models.Transfer) {
-	// Convert to frontend-expected format
-	enhancedTransfer := map[string]interface{}{
+// getClientSnapshot creates a snapshot of clients with minimal lock time (2.2 optimization)
+func (b *Broadcaster) getClientSnapshot() []*Client {
+	b.mu.RLock()
+	clients := make([]*Client, 0, len(b.clients))
+	for client := range b.clients {
+		clients = append(clients, client)
+	}
+	b.mu.RUnlock()
+	return clients
+}
+
+// buildTransferData creates the transfer data structure without holding locks
+func (b *Broadcaster) buildTransferData(transfer models.Transfer) map[string]interface{} {
+	return map[string]interface{}{
 		"source_chain": map[string]interface{}{
 			"universal_chain_id": transfer.SourceChain.UniversalChainID,
 			"display_name":       transfer.SourceChain.DisplayName,
@@ -267,107 +278,113 @@ func (b *Broadcaster) broadcastTransfer(transfer models.Transfer) {
 		"senderDisplay":          transfer.SenderDisplay,
 		"receiverDisplay":        transfer.ReceiverDisplay,
 	}
-	
-	data, err := json.Marshal(map[string]interface{}{
-		"type": "transfers",
-		"data": []map[string]interface{}{enhancedTransfer},
-	})
+}
+
+// broadcastTransfer broadcasts a single transfer to all connected clients with optimized performance
+func (b *Broadcaster) broadcastTransfer(transfer models.Transfer) {
+	// Marshal using optimized JSON functions (includes pooling and pre-marshaled content)
+	data, err := utils.DefaultMarshalTransfer(transfer)
 	if err != nil {
-		fmt.Printf("[BROADCASTER] Failed to marshal transfer %s: %v\n", transfer.PacketHash, err)
+		utils.LogError("BROADCASTER", "Failed to marshal transfer %s: %v", transfer.PacketHash, err)
 		return
 	}
 	
-	b.mu.RLock()
-	clients := make([]*Client, 0, len(b.clients))
-	for client := range b.clients {
-		clients = append(clients, client)
-	}
+	// Get client snapshot with minimal lock time
+	clients := b.getClientSnapshot()
 	clientCount := len(clients)
-	b.mu.RUnlock()
 	
 	// Always log when we receive a transfer, even if no clients
 	if clientCount == 0 {
-		fmt.Printf("[BROADCASTER] Received transfer %s but no clients connected, skipping broadcast\n", transfer.PacketHash)
+		utils.LogDebug("BROADCASTER", "Received transfer %s but no clients connected, skipping broadcast", transfer.PacketHash)
 		return
 	}
 	
-	fmt.Printf("[BROADCASTER] Broadcasting transfer %s to %d clients\n", transfer.PacketHash, clientCount)
+	utils.LogInfo("BROADCASTER", "Broadcasting transfer %s to %d clients", transfer.PacketHash, clientCount)
 	
-	// Send to all clients with improved error handling
+	// Send to all clients with backpressure protection
 	successCount := 0
 	for _, client := range clients {
-		if b.sendToClient(client, data) {
+		if b.sendToClientOptimized(client, data) {
 			successCount++
 		}
 	}
 	
 	if successCount > 0 {
-		fmt.Printf("[BROADCASTER] Successfully sent transfer %s to %d/%d clients\n", transfer.PacketHash, successCount, clientCount)
+		utils.LogInfo("BROADCASTER", "Successfully sent transfer %s to %d/%d clients", transfer.PacketHash, successCount, clientCount)
 	}
 }
 
-// sendToClient sends data to a specific client with proper error handling
-func (b *Broadcaster) sendToClient(client *Client, data []byte) bool {
+// sendToClientOptimized sends data to a client with backpressure protection
+func (b *Broadcaster) sendToClientOptimized(client *Client, data []byte) bool {
 	if client.isClosing {
 		return false
 	}
 	
-	select {
-	case client.send <- data:
-		return true
-	default:
-		// Client's send channel is full
-		if b.config.DropSlowClients {
-			fmt.Printf("[BROADCASTER] Client %s send buffer full, scheduling disconnect\n", client.id)
-			go func() { b.unregister <- client }()
-		}
-		return false
+	// Use optimized backpressure protection
+	config := utils.DefaultBackpressureConfig()
+	config.DropOnOverflow = b.config.DropSlowClients
+	config.TimeoutMs = 50 // Quick timeout for client sends
+	
+	success := utils.SendWithBackpressure(client.send, data, config, nil)
+	
+	// If failed and we drop slow clients, schedule disconnect
+	if !success && b.config.DropSlowClients {
+		utils.LogDebug("BROADCASTER", "Client %s send buffer full, scheduling disconnect", client.id)
+		go func() { 
+			select {
+			case b.unregister <- client:
+			default:
+				// If unregister channel is full, force close
+				client.safeClose()
+			}
+		}()
 	}
+	
+	return success
 }
 
-// broadcastChartData broadcasts chart data to all connected clients
+// sendToClient is kept for backward compatibility but uses optimized version
+func (b *Broadcaster) sendToClient(client *Client, data []byte) bool {
+	return b.sendToClientOptimized(client, data)
+}
+
+// broadcastChartData broadcasts chart data to all connected clients with optimized performance
 func (b *Broadcaster) broadcastChartData(rawData interface{}) {
 	if rawData == nil {
-		fmt.Printf("[BROADCASTER] Warning: Attempted to broadcast nil chart data\n")
+		utils.LogWarn("BROADCASTER", "Attempted to broadcast nil chart data")
 		return
 	}
 	
-	data, err := json.Marshal(map[string]interface{}{
-		"type": "chartData",
-		"data": rawData,
-	})
+	// Marshal using optimized JSON functions
+	data, err := utils.DefaultMarshalChart(rawData)
 	if err != nil {
-		fmt.Printf("[BROADCASTER] Failed to marshal chart data: %v\n", err)
+		utils.LogError("BROADCASTER", "Failed to marshal chart data: %v", err)
 		return
 	}
 	
-	b.mu.RLock()
-	clients := make([]*Client, 0, len(b.clients))
-	for client := range b.clients {
-		clients = append(clients, client)
-	}
+	// Get client snapshot with minimal lock time
+	clients := b.getClientSnapshot()
 	clientCount := len(clients)
-	b.mu.RUnlock()
 	
 	if clientCount == 0 {
-		fmt.Printf("[BROADCASTER] No clients connected for chart data broadcast\n")
+		utils.LogDebug("BROADCASTER", "No clients connected for chart data broadcast")
 		return
 	}
 	
-	fmt.Printf("[BROADCASTER] Broadcasting chart data to %d clients (size: %d bytes)\n", 
-		clientCount, len(data))
+	utils.LogInfo("BROADCASTER", "Broadcasting chart data to %d clients (size: %d bytes)", clientCount, len(data))
 	
+	// Send to all clients with backpressure protection
 	successCount := 0
 	for _, client := range clients {
-		if b.sendToClient(client, data) {
+		if b.sendToClientOptimized(client, data) {
 			successCount++
 		}
 	}
 	
 	if successCount > 0 {
-		fmt.Printf("[BROADCASTER] Successfully sent chart data to %d/%d clients\n", successCount, clientCount)
+		utils.LogInfo("BROADCASTER", "Successfully sent chart data to %d/%d clients", successCount, clientCount)
 	} else {
-		fmt.Printf("[BROADCASTER] Warning: Failed to send chart data to any clients\n")
+		utils.LogWarn("BROADCASTER", "Failed to send chart data to any clients")
 	}
 }
 
@@ -380,7 +397,7 @@ func (b *Broadcaster) sendPeriodicChartUpdate() {
 	if clientCount > 0 {
 		// Check if we're already fetching chart data to prevent concurrent fetches
 		if !atomic.CompareAndSwapInt32(&b.chartFetching, 0, 1) {
-			fmt.Printf("[BROADCASTER] Chart data fetch already in progress, skipping\n")
+			utils.LogDebug("BROADCASTER", "Chart data fetch already in progress, skipping")
 			return
 		}
 		
@@ -389,18 +406,18 @@ func (b *Broadcaster) sendPeriodicChartUpdate() {
 			defer func() {
 				atomic.StoreInt32(&b.chartFetching, 0) // Reset the flag
 				if r := recover(); r != nil {
-					fmt.Printf("[BROADCASTER] Panic in sendPeriodicChartUpdate: %v\n", r)
+					utils.LogError("BROADCASTER", "Panic in sendPeriodicChartUpdate: %v", r)
 				}
 			}()
 			
-			fmt.Printf("[BROADCASTER] Fetching periodic chart data for %d clients\n", clientCount)
+			utils.LogDebug("BROADCASTER", "Fetching periodic chart data for %d clients", clientCount)
 			
 			// Fetch chart data with timeout
 			chartDataChan := make(chan interface{}, 1)
 			go func() {
 				defer func() {
 					if r := recover(); r != nil {
-						fmt.Printf("[BROADCASTER] Panic in periodic chart data fetch: %v\n", r)
+						utils.LogError("BROADCASTER", "Panic in periodic chart data fetch: %v", r)
 					}
 				}()
 				chartData := b.statsCollector.GetChartDataForFrontend()
@@ -413,10 +430,10 @@ func (b *Broadcaster) sendPeriodicChartUpdate() {
 			var chartData interface{}
 			select {
 			case chartData = <-chartDataChan:
-				fmt.Printf("[BROADCASTER] Successfully fetched chart data\n")
+				utils.LogDebug("BROADCASTER", "Successfully fetched chart data")
 				b.broadcastChartData(chartData)
 			case <-time.After(3 * time.Second):
-				fmt.Printf("[BROADCASTER] Timeout fetching periodic chart data\n")
+				utils.LogWarn("BROADCASTER", "Timeout fetching periodic chart data")
 			}
 		}()
 	}
@@ -437,7 +454,7 @@ func (b *Broadcaster) performHealthCheck() {
 	for _, client := range clients {
 		// Check if client hasn't responded to pings for too long (2 minutes)
 		if now.Sub(client.lastPong) > 2*time.Minute {
-			fmt.Printf("[BROADCASTER] Client %s appears stale (last pong: %v ago), removing\n", 
+			utils.LogInfo("BROADCASTER", "Client %s appears stale (last pong: %v ago), removing", 
 				client.id, now.Sub(client.lastPong))
 			go func(c *Client) { b.unregister <- c }(client)
 			staleClients++
@@ -445,37 +462,43 @@ func (b *Broadcaster) performHealthCheck() {
 	}
 	
 	if staleClients > 0 {
-		fmt.Printf("[BROADCASTER] Health check removed %d stale clients\n", staleClients)
+		utils.LogInfo("BROADCASTER", "Health check removed %d stale clients", staleClients)
 	}
 }
 
-// UpgradeConnection upgrades HTTP connection to WebSocket with improved settings
+// UpgradeConnection upgrades HTTP connection to WebSocket with optimized settings
 func (b *Broadcaster) UpgradeConnection(w http.ResponseWriter, r *http.Request) {
 	conn, err := b.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		fmt.Printf("[BROADCASTER] Failed to upgrade connection: %v\n", err)
+		utils.LogError("BROADCASTER", "Failed to upgrade connection: %v", err)
 		return
 	}
 	
 	// Configure connection settings
 	conn.SetReadLimit(512)
 	
+	// Use optimized buffer size from configuration or defaults
+	bufferSize := utils.DefaultGetChannelBufferSize("ClientSend", b.config.BufferSize)
+	
 	client := &Client{
 		id:       generateClientID(),
 		conn:     conn,
-		send:     make(chan []byte, b.config.BufferSize), // Use config buffer size
+		send:     make(chan []byte, bufferSize),
 		lastPong: time.Now(),
 		isClosing: false,
 	}
 	
-	fmt.Printf("[BROADCASTER] New WebSocket connection from %s, assigned ID: %s\n", 
+	utils.LogInfo("BROADCASTER", "New WebSocket connection from %s, assigned ID: %s", 
 		r.RemoteAddr, client.id)
 	
-	// Register client (non-blocking)
-	select {
-	case b.register <- client:
-	case <-time.After(100 * time.Millisecond):
-		fmt.Printf("[BROADCASTER] Failed to register client %s (register channel full)\n", client.id)
+	// Register client with backpressure protection
+	config := utils.DefaultBackpressureConfig()
+	config.TimeoutMs = 100
+	config.DropOnOverflow = true
+	
+	success := utils.SendWithBackpressure(b.register, client, config, nil)
+	if !success {
+		utils.LogWarn("BROADCASTER", "Failed to register client %s (register channel full)", client.id)
 		client.safeClose()
 	}
 }
@@ -504,7 +527,7 @@ func (b *Broadcaster) GetShardStats() map[string]interface{} {
 // cleanup performs final cleanup when broadcaster shuts down
 func (b *Broadcaster) cleanup() {
 	b.shutdownOnce.Do(func() {
-		fmt.Printf("[BROADCASTER] Performing cleanup\n")
+		utils.LogInfo("BROADCASTER", "Performing cleanup")
 		
 		b.mu.Lock()
 		for client := range b.clients {
@@ -561,7 +584,7 @@ func (c *Client) writePump(unregister chan<- *Client) {
 			
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					fmt.Printf("[BROADCASTER] Write error for client %s: %v\n", c.id, err)
+					utils.LogDebug("BROADCASTER", "Write error for client %s: %v", c.id, err)
 				}
 				return
 			}
@@ -602,7 +625,7 @@ func (c *Client) readPump(unregister chan<- *Client) {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				fmt.Printf("[BROADCASTER] Read error for client %s: %v\n", c.id, err)
+				utils.LogDebug("BROADCASTER", "Read error for client %s: %v", c.id, err)
 			}
 			break
 		}
@@ -618,5 +641,5 @@ func (c *Client) GetID() string {
 
 // generateClientID generates a unique client ID
 func generateClientID() string {
-	return fmt.Sprintf("client_%d", time.Now().UnixNano())
+	return utils.DefaultGenerateID("client")
 } 

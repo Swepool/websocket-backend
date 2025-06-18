@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"websocket-backend-new/internal/channels"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
 
@@ -41,7 +42,7 @@ func (e *Enhancer) Start(ctx context.Context) {
 			return
 			
 		case transfers := <-e.channels.RawTransfers:
-			fmt.Printf("[ENHANCER] Received %d transfers from fetcher\n", len(transfers))
+			utils.BatchInfo("ENHANCER", fmt.Sprintf("Received %d transfers from fetcher", len(transfers)))
 			e.processTransferBatch(transfers)
 		}
 	}
@@ -58,24 +59,28 @@ func (e *Enhancer) processTransferBatch(transfers []models.Transfer) {
 		enhanced[i] = e.enhanceTransfer(transfer)
 	}
 	
-	// Send enhanced transfers to scheduler
-	select {
-	case e.channels.EnhancedTransfers <- enhanced:
-		fmt.Printf("[ENHANCER] Sent %d enhanced transfers to scheduler\n", len(enhanced))
-	default:
-		fmt.Printf("[ENHANCER] Warning: scheduler channel full, dropping %d transfers\n", len(enhanced))
+	// Send enhanced transfers to scheduler with backpressure protection
+	backpressureConfig := utils.DefaultBackpressureConfig()
+	backpressureConfig.DropOnOverflow = false
+	backpressureConfig.TimeoutMs = 100
+	
+	if utils.SendWithBackpressure(e.channels.EnhancedTransfers, enhanced, backpressureConfig, nil) {
+		utils.BatchInfo("ENHANCER", fmt.Sprintf("Sent %d enhanced transfers to scheduler", len(enhanced)))
+	} else {
+		utils.BatchError("ENHANCER", fmt.Sprintf("Failed to send %d transfers to scheduler (timeout/overflow)", len(enhanced)))
 	}
 	
-	// Send each transfer to stats collector 
+	// Send each transfer to stats collector with optimized sending
 	statsCount := 0
 	for _, transfer := range enhanced {
-		select {
-		case e.channels.StatsUpdates <- transfer:
+		if utils.TrySend(e.channels.StatsUpdates, transfer, nil) {
 			statsCount++
-		default:
 		}
 	}
-	fmt.Printf("[ENHANCER] Sent %d transfers to stats collector\n", statsCount)
+	
+	if statsCount > 0 {
+		utils.BatchInfo("ENHANCER", fmt.Sprintf("Sent %d transfers to stats collector", statsCount))
+	}
 }
 
 // enhanceTransfer enhances a single transfer with additional data
@@ -95,4 +100,5 @@ func (e *Enhancer) enhanceTransfer(transfer models.Transfer) models.Transfer {
 	return transfer
 }
 
+ 
  

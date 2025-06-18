@@ -2,10 +2,10 @@ package chains
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 	"websocket-backend-new/api/graphql"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
 
@@ -52,13 +52,13 @@ func (s *Service) SetLatencyCallback(callback LatencyUpdateCallback) {
 
 // Start begins the chains service
 func (s *Service) Start(ctx context.Context) {
-	fmt.Printf("[CHAINS] Starting chains service...\n")
+	utils.LogInfo("CHAINS", "Starting chains service")
 	// Initial fetch
 	if err := s.refreshChains(ctx); err != nil {
-		fmt.Printf("[CHAINS] Failed to fetch initial chains: %v\n", err)
+		utils.LogError("CHAINS", "Failed to fetch initial chains: %v", err)
 		return
 	}
-	fmt.Printf("[CHAINS] Initial chains fetch completed\n")
+	utils.LogInfo("CHAINS", "Initial chains fetch completed")
 	
 	// Initial latency fetch
 	s.refreshLatencyData(ctx)
@@ -113,7 +113,7 @@ func (s *Service) FetchLatencyData(ctx context.Context) ([]models.LatencyData, e
 	s.mu.RUnlock()
 	
 	if len(chains) < 2 {
-		fmt.Printf("[CHAINS] Not enough chains for latency data (%d chains)\n", len(chains))
+		utils.LogWarn("CHAINS", "Not enough chains for latency data (%d chains)", len(chains))
 		return []models.LatencyData{}, nil // Need at least 2 chains for latency data
 	}
 	
@@ -131,7 +131,7 @@ func (s *Service) FetchLatencyData(ctx context.Context) ([]models.LatencyData, e
 			// Check context cancellation before each request
 			select {
 			case <-ctx.Done():
-				fmt.Printf("[CHAINS] Context cancelled, stopping latency fetch\n")
+				utils.LogInfo("CHAINS", "Context cancelled, stopping latency fetch")
 				return latencyData, nil
 			default:
 			}
@@ -144,7 +144,7 @@ func (s *Service) FetchLatencyData(ctx context.Context) ([]models.LatencyData, e
 			if err != nil {
 				errorCount++
 				// Log error but continue with other pairs
-				fmt.Printf("[CHAINS] Failed to fetch latency for %s -> %s: %v\n", sourceChain.DisplayName, destChain.DisplayName, err)
+				utils.LogWarn("CHAINS", "Failed to fetch latency for %s -> %s: %v", sourceChain.DisplayName, destChain.DisplayName, err)
 				continue
 			}
 			
@@ -159,9 +159,9 @@ func (s *Service) FetchLatencyData(ctx context.Context) ([]models.LatencyData, e
 	}
 	
 	if successCount > 0 {
-		fmt.Printf("[CHAINS] Successfully fetched latency data for %d chain pairs (%d failed)\n", successCount, errorCount)
+		utils.LogInfo("CHAINS", "Successfully fetched latency data for %d chain pairs (%d failed)", successCount, errorCount)
 	} else if errorCount > 0 {
-		fmt.Printf("[CHAINS] Failed to fetch latency data for all %d chain pairs attempted\n", errorCount)
+		utils.LogWarn("CHAINS", "Failed to fetch latency data for all %d chain pairs attempted", errorCount)
 	}
 	
 	return latencyData, nil
@@ -207,7 +207,7 @@ func (s *Service) refreshChains(ctx context.Context) error {
 	s.chains = chains
 	s.mu.Unlock()
 	
-	fmt.Printf("[CHAINS] Successfully fetched and stored %d chains\n", len(chains))
+	utils.LogInfo("CHAINS", "Successfully fetched and stored %d chains", len(chains))
 	return nil
 }
 
@@ -225,7 +225,7 @@ func (s *Service) refreshLatencyData(ctx context.Context) {
 		
 		latencyData, err := s.FetchLatencyData(latencyCtx)
 		if err != nil {
-			fmt.Printf("[CHAINS] Failed to fetch latency data: %v\n", err)
+			utils.LogError("CHAINS", "Failed to fetch latency data: %v", err)
 			return
 		}
 		

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -12,11 +11,12 @@ import (
 	"websocket-backend-new/internal/pipeline"
 	"websocket-backend-new/internal/server"
 	"websocket-backend-new/internal/chains"
+	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 )
 
 func main() {
-	fmt.Printf("Starting WebSocket Backend...\n")
+	utils.LogInfo("MAIN", "Starting WebSocket Backend")
 	
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -24,16 +24,23 @@ func main() {
 	
 	// Load application configuration
 	appConfig := config.LoadConfig()
-	fmt.Printf("Configuration loaded\n")
+	utils.LogInfo("MAIN", "Configuration loaded")
+	
+	// Initialize all performance optimizations
+	utils.InitializeOptimizations()
+	utils.LogInfo("MAIN", "Performance optimizations initialized")
+	
+	// Print optimization status
+	utils.PrintOptimizationStatus()
 	
 	// Print broadcaster configuration
-	fmt.Printf("Broadcaster configuration:\n")
-	fmt.Printf("  Sharding enabled: %v\n", appConfig.Broadcaster.UseSharding)
+	utils.LogInfo("MAIN", "Broadcaster configuration:")
+	utils.LogInfo("MAIN", "  Sharding enabled: %v", appConfig.Broadcaster.UseSharding)
 	if appConfig.Broadcaster.UseSharding {
-		fmt.Printf("  Number of shards: %d\n", appConfig.Broadcaster.NumShards)
-		fmt.Printf("  Workers per shard: %d\n", appConfig.Broadcaster.WorkersPerShard)
-		fmt.Printf("  Max clients per shard: %d\n", appConfig.Broadcaster.MaxClients)
-		fmt.Printf("  Total capacity: %d clients\n", 
+		utils.LogInfo("MAIN", "  Number of shards: %d", appConfig.Broadcaster.NumShards)
+		utils.LogInfo("MAIN", "  Workers per shard: %d", appConfig.Broadcaster.WorkersPerShard)
+		utils.LogInfo("MAIN", "  Max clients per shard: %d", appConfig.Broadcaster.MaxClients)
+		utils.LogInfo("MAIN", "  Total capacity: %d clients", 
 			appConfig.Broadcaster.NumShards*appConfig.Broadcaster.MaxClients)
 	}
 	
@@ -43,15 +50,15 @@ func main() {
 	// Create pipeline with configuration and chains service
 	coordinator, err := pipeline.NewCoordinator(appConfig.Pipeline, chainsService)
 	if err != nil {
-		fmt.Printf("Failed to create coordinator: %v\n", err)
+		utils.LogError("MAIN", "Failed to create coordinator: %v", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Pipeline coordinator created\n")
+	utils.LogInfo("MAIN", "Pipeline coordinator created")
 	
 	// Set up latency callback to update stats collector
 	chainsService.SetLatencyCallback(func(latencyData []models.LatencyData) {
 		coordinator.GetStatsCollector().UpdateLatencyData(latencyData)
-		fmt.Printf("Updated latency data with %d chain pairs\n", len(latencyData))
+		utils.LogInfo("MAIN", "Updated latency data with %d chain pairs", len(latencyData))
 	})
 	
 	// Create server with coordinator and chains service
@@ -64,7 +71,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		if err := coordinator.Start(ctx); err != nil {
-			fmt.Printf("Pipeline error: %v\n", err)
+			utils.LogError("MAIN", "Pipeline error: %v", err)
 		}
 	}()
 	
@@ -73,19 +80,19 @@ func main() {
 	go func() {
 		defer wg.Done()
 		if err := srv.Start(ctx, appConfig.Server.Port); err != nil {
-			fmt.Printf("Server error: %v\n", err)
+			utils.LogError("MAIN", "Server error: %v", err)
 		}
 	}()
 	
-	fmt.Printf("WebSocket Backend started successfully on %s\n", appConfig.Server.Port)
-	fmt.Printf("Press Ctrl+C to stop...\n")
+	utils.LogInfo("MAIN", "WebSocket Backend started successfully on %s", appConfig.Server.Port)
+	utils.LogInfo("MAIN", "Press Ctrl+C to stop...")
 	
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	
 	<-sigChan
-	fmt.Printf("Shutdown signal received...\n")
+	utils.LogInfo("MAIN", "Shutdown signal received")
 	
 	// Cancel context to signal shutdown
 	cancel()
@@ -101,9 +108,9 @@ func main() {
 	// Wait for shutdown with timeout
 	select {
 	case <-done:
-		fmt.Printf("Graceful shutdown completed\n")
+		utils.LogInfo("MAIN", "Graceful shutdown completed")
 	case <-time.After(10 * time.Second):
-		fmt.Printf("Shutdown timeout reached\n")
+		utils.LogWarn("MAIN", "Shutdown timeout reached")
 	}
 }
 
