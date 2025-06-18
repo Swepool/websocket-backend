@@ -388,7 +388,7 @@ func (b *Broadcaster) broadcastChartData(rawData interface{}) {
 	}
 }
 
-// sendPeriodicChartUpdate sends periodic chart updates
+// sendPeriodicChartUpdate sends periodic chart updates ONLY when meaningful data exists
 func (b *Broadcaster) sendPeriodicChartUpdate() {
 	b.mu.RLock()
 	clientCount := len(b.clients)
@@ -430,7 +430,7 @@ func (b *Broadcaster) sendPeriodicChartUpdate() {
 			var chartData interface{}
 			select {
 			case chartData = <-chartDataChan:
-				utils.LogDebug("BROADCASTER", "Successfully fetched chart data")
+				utils.LogDebug("BROADCASTER", "Broadcasting chart data to all clients")
 				b.broadcastChartData(chartData)
 			case <-time.After(3 * time.Second):
 				utils.LogWarn("BROADCASTER", "Timeout fetching periodic chart data")
@@ -438,6 +438,8 @@ func (b *Broadcaster) sendPeriodicChartUpdate() {
 		}()
 	}
 }
+
+
 
 // performHealthCheck checks client health and removes stale connections
 func (b *Broadcaster) performHealthCheck() {

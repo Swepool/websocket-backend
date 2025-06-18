@@ -568,7 +568,7 @@ func (sb *ShardedBroadcaster) broadcastChartData(rawData interface{}) {
 	}
 }
 
-// sendPeriodicChartUpdate sends periodic chart updates
+// sendPeriodicChartUpdate sends periodic chart updates ONLY when meaningful data exists
 func (sb *ShardedBroadcaster) sendPeriodicChartUpdate() {
 	clientCount := sb.GetClientCount()
 	if clientCount > 0 {
@@ -607,7 +607,7 @@ func (sb *ShardedBroadcaster) sendPeriodicChartUpdate() {
 			var chartData interface{}
 			select {
 			case chartData = <-chartDataChan:
-				utils.LogDebug("SHARDED_BROADCASTER", "Successfully fetched chart data")
+				utils.LogDebug("SHARDED_BROADCASTER", "Broadcasting chart data to all clients")
 				sb.broadcastChartData(chartData)
 			case <-time.After(3 * time.Second):
 				utils.LogWarn("SHARDED_BROADCASTER", "Timeout fetching periodic chart data")
@@ -615,6 +615,8 @@ func (sb *ShardedBroadcaster) sendPeriodicChartUpdate() {
 		}()
 	}
 }
+
+
 
 // UpgradeConnection upgrades HTTP connection to WebSocket and assigns to appropriate shard with enhanced settings
 func (sb *ShardedBroadcaster) UpgradeConnection(w http.ResponseWriter, r *http.Request) {

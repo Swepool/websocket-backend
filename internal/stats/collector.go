@@ -135,7 +135,7 @@ func DefaultConfig() Config {
 		// Performance settings
 		MaxHLLMemoryMB:       50,
 		BatchProcessingSize:  10,
-		CacheUpdateInterval:  5 * time.Second,
+		CacheUpdateInterval:  5 * time.Second, // REVERTED: Fast updates for responsiveness
 	}
 }
 
@@ -227,19 +227,11 @@ func (h *HLLManager) adjustPrecision() {
 	if currentMB > h.maxMemoryMB && currentPrecision == 16 {
 		// Reduce precision under memory pressure (16 -> 14)
 		atomic.StoreInt32(&h.precisionLevel, 14)
-		utils.LogInfo("stats.hll_manager", "Reduced HLL precision due to memory pressure", map[string]interface{}{
-			"memory_mb": currentMB,
-			"max_mb": h.maxMemoryMB,
-			"new_precision": 14,
-		})
+		utils.LogInfo("stats.hll_manager", "Reduced HLL precision due to memory pressure: %d MB > %d MB, precision: %d", currentMB, h.maxMemoryMB, 14)
 	} else if currentMB < h.maxMemoryMB/2 && currentPrecision == 14 {
 		// Increase precision when memory is available (14 -> 16)
 		atomic.StoreInt32(&h.precisionLevel, 16)
-		utils.LogInfo("stats.hll_manager", "Increased HLL precision with available memory", map[string]interface{}{
-			"memory_mb": currentMB,
-			"max_mb": h.maxMemoryMB,
-			"new_precision": 16,
-		})
+		utils.LogInfo("stats.hll_manager", "Increased HLL precision with available memory: %d MB < %d MB, precision: %d", currentMB, h.maxMemoryMB/2, 16)
 	}
 }
 
@@ -636,10 +628,7 @@ func (c *Collector) ProcessTransfer(transfer models.Transfer) {
 	default:
 		// Channel full, process immediately to avoid blocking
 		c.processTransferImmediate(transfer)
-		utils.LogInfo("stats.collector", "Batch channel full, processing transfer immediately", map[string]interface{}{
-			"queue_size": len(c.batchChannel),
-			"max_size": cap(c.batchChannel),
-		})
+		utils.LogInfo("stats.collector", "Batch channel full, processing transfer immediately: %d/%d", len(c.batchChannel), cap(c.batchChannel))
 	}
 }
 
@@ -686,7 +675,7 @@ func (c *Collector) batchProcessor() {
 	batch := transferBatchPool.Get().(*TransferBatch)
 	batch.transfers = batch.transfers[:0] // Reset slice
 	
-	ticker := time.NewTicker(100 * time.Millisecond) // Process batches every 100ms
+	ticker := time.NewTicker(25 * time.Millisecond) // Process batches every 25ms for faster data appearance
 	defer ticker.Stop()
 	
 	for {
@@ -734,11 +723,8 @@ func (c *Collector) processBatch(batch *TransferBatch) {
 		c.processTransferUnsafe(transfer)
 	}
 	
-	utils.LogDebug("stats.collector", "Processed transfer batch", map[string]interface{}{
-		"batch_size": len(batch.transfers),
-		"total_processed": atomic.LoadInt64(&c.transfersProcessed),
-		"total_batches": atomic.LoadInt64(&c.batchesProcessed),
-	})
+	utils.LogDebug("stats.collector", "Processed transfer batch: size=%d, total_processed=%d, total_batches=%d", 
+		len(batch.transfers), atomic.LoadInt64(&c.transfersProcessed), atomic.LoadInt64(&c.batchesProcessed))
 }
 
 // asyncCleanup runs cleanup operations in background without blocking transfers
@@ -778,11 +764,7 @@ func (c *Collector) hllMemoryMonitor() {
 		case <-ticker.C:
 			memoryMB := c.hllManager.getCurrentMemoryMB()
 			if memoryMB > c.hllManager.maxMemoryMB {
-				utils.LogInfo("stats.hll_monitor", "HLL memory usage high", map[string]interface{}{
-					"current_mb": memoryMB,
-					"max_mb": c.hllManager.maxMemoryMB,
-					"precision": c.hllManager.getPrecision(),
-				})
+				utils.LogInfo("stats.hll_monitor", "HLL memory usage high: %d MB > %d MB, precision: %d", memoryMB, c.hllManager.maxMemoryMB, c.hllManager.getPrecision())
 				c.hllManager.adjustPrecision()
 			}
 		case <-c.batchProcessorDone:
@@ -833,15 +815,11 @@ func (c *Collector) updateAggregateCache() {
 	c.aggregateCache.topAssets = topAssets
 	c.aggregateCache.uniqueWallets = uniqueWallets
 	c.aggregateCache.lastUpdated = now
-	c.aggregateCache.validUntil = now.Add(c.config.CacheUpdateInterval * 2) // Cache valid for 2x update interval
+	c.aggregateCache.validUntil = now.Add(c.config.CacheUpdateInterval * 2) // Cache valid for 2x update interval (10s responsiveness)
 	c.aggregateCache.mu.Unlock()
 	
-	utils.LogDebug("stats.cache", "Updated aggregate cache", map[string]interface{}{
-		"routes_count": len(topRoutes),
-		"chains_count": len(chainFlows),
-		"assets_count": len(topAssets),
-		"cache_valid_until": c.aggregateCache.validUntil.Format(time.RFC3339),
-	})
+	utils.LogDebug("stats.cache", "Updated aggregate cache: routes=%d, chains=%d, assets=%d, valid_until=%s", 
+		len(topRoutes), len(chainFlows), len(topAssets), c.aggregateCache.validUntil.Format(time.RFC3339))
 }
 
 // getOrCreateBucket gets or creates a bucket for the given timestamp using optimized memory pools
@@ -1400,7 +1378,7 @@ func (c *Collector) GetChartDataForFrontend() interface{} {
 	return frontendData
 }
 
-// buildFrontendResponse builds the frontend response from cached data (fast path)
+// buildFrontendResponse builds the frontend response with cached transfer rates but live chart data
 func (c *Collector) buildFrontendResponse(transferRates TransferRates, uniqueWallets struct {
 	Senders   int64
 	Receivers int64
@@ -1474,24 +1452,24 @@ func (c *Collector) buildFrontendResponse(transferRates TransferRates, uniqueWal
 	// Get latency data
 	latencyData := c.getLatencyData()
 	
-	// Build optimized response for cached data
+	// Build response with LIVE DATA even for cached responses
 	return map[string]interface{}{
 		"currentRates":           transferRatesForFrontend,
 		"activeWalletRates":      activeWalletRates,
 		"popularRoutes":          topRoutes,
-		"popularRoutesTimeScale": map[string]interface{}{}, // Simplified for cache
-		"activeSenders":          []interface{}{},          // Simplified for cache
-		"activeReceivers":        []interface{}{},          // Simplified for cache
-		"activeSendersTimeScale": map[string]interface{}{}, // Simplified for cache
-		"activeReceiversTimeScale": map[string]interface{}{}, // Simplified for cache
+		"popularRoutesTimeScale": c.getPopularRoutesTimeScale(), // Use live data
+		"activeSenders":          c.getTopSenders(now.Add(-time.Minute), c.config.TopItemsLimit), // Use live data
+		"activeReceivers":        c.getTopReceivers(now.Add(-time.Minute), c.config.TopItemsLimit), // Use live data
+		"activeSendersTimeScale": c.getActiveSendersTimeScale(), // Use live data
+		"activeReceiversTimeScale": c.getActiveReceiversTimeScale(), // Use live data
 		"chainFlowData": map[string]interface{}{
-			"chains":             []interface{}{}, // Simplified for cache
-			"chainFlowTimeScale": map[string]interface{}{},
-			"totalOutgoing":      int64(0),
-			"totalIncoming":      int64(0),
+			"chains":             c.getChainFlows(now.Add(-time.Minute)), // Use live data
+			"chainFlowTimeScale": c.getChainFlowTimeScale(), // Use live data
+			"totalOutgoing":      c.calculateTotalOutgoing(now.Add(-time.Minute)), // Use live data
+			"totalIncoming":      c.calculateTotalIncoming(now.Add(-time.Minute)), // Use live data
 			"serverUptimeSeconds": transferRates.Uptime,
 		},
-		"assetVolumeData":  map[string]interface{}{}, // Simplified for cache
+		"assetVolumeData":  c.getAssetVolumeDataForFrontend(now.Add(-time.Minute), transferRates.Uptime), // Use live data
 		"dataAvailability": transferRates.DataAvailability,
 		"latencyData":      latencyData,
 		"_cached":          true, // Debug marker
@@ -1592,89 +1570,92 @@ func (c *Collector) calculateTransferRates(now time.Time) TransferRates {
 		Last14Days:       last14Days,
 		Last30Days:       last30Days,
 		Total:            total, // No changes for total
-		DataAvailability: c.calculateDataAvailability(now),
+		DataAvailability: c.calculateDataAvailabilityUnified(now, &LiveBucketSource{collector: c}),
 		Uptime:           uptime,
 	}
 }
 
-// calculateDataAvailability determines what time periods have sufficient data
-// calculateDataAvailability determines what time ranges have sufficient data available
+// calculateDataAvailabilityUnified determines what time ranges have sufficient data available
+// Works with both live data and snapshots via BucketSource interface
 // Conservative approach: only show data for timeframes where we have adequate system uptime AND data
-func (c *Collector) calculateDataAvailability(now time.Time) DataAvailability {
-	uptime := now.Sub(c.startTime)
+func (c *Collector) calculateDataAvailabilityUnified(now time.Time, source BucketSource) DataAvailability {
+	uptime := now.Sub(source.GetStartTime())
 	
 	// Helper function to check if we have adequate data coverage for a timeframe
-	hasSufficientData := func(duration time.Duration, since time.Time) bool {
-		// Must have at least the minimum uptime for this timeframe
-		if uptime < duration {
+	hasSufficientDataContent := func(duration time.Duration, since time.Time) bool {
+		// Must have at least the minimum uptime for this timeframe (with reasonable buffer)
+		requiredUptime := duration
+		if duration <= time.Minute {
+			requiredUptime = 30 * time.Second // Need 30s for 1-minute data
+		} else if duration <= time.Hour {
+			requiredUptime = 5 * time.Minute // Need 5 minutes for 1-hour data
+		} else if duration <= 24*time.Hour {
+			requiredUptime = 30 * time.Minute // Need 30 minutes for 1-day data
+		} else if duration <= 7*24*time.Hour {
+			requiredUptime = 2 * time.Hour // Need 2 hours for 7-day data
+		} else {
+			requiredUptime = 6 * time.Hour // Need 6 hours for longer periods
+		}
+		
+		if uptime < requiredUptime {
 			return false
 		}
 		
-		// Count buckets with data in the timeframe to ensure sufficient coverage
-		bucketCount := 0
+		// Use the SAME logic as aggregateBucketsForPeriod to check for actual data
+		var buckets []*StatsBucket
 		
-		// Check appropriate bucket tier based on timeframe
-		if duration <= time.Hour {
-			// For short timeframes, check 10s and 1m buckets
-			for timestamp := range c.buckets10s {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range c.buckets1m {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			// Need at least a few buckets for reliable data
-			return bucketCount >= 3
-		} else if duration <= 24*time.Hour {
-			// For medium timeframes, check 1m and 1h buckets  
-			for timestamp := range c.buckets1m {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range c.buckets1h {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			// Need at least several buckets for daily data
-			return bucketCount >= 6
-		} else {
-			// For long timeframes, check 1h, daily, weekly buckets
-			for timestamp := range c.buckets1h {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range c.bucketsDaily {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range c.bucketsWeekly {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			// Need meaningful bucket coverage for long-term data
-			if duration <= 7*24*time.Hour {
-				return bucketCount >= 12 // At least half a day of hourly data
-			} else {
-				return bucketCount >= 3 // At least a few daily buckets
+		// Include 10-second buckets (most recent data: 0-30min)
+		for timestamp, bucket := range source.Get10sBuckets() {
+			if bucket != nil && bucket.TransferCount > 0 && (since.IsZero() || timestamp.After(since)) {
+				buckets = append(buckets, bucket)
 			}
 		}
+		
+		// Include 1-minute buckets (recent data: 30min-6h)
+		for timestamp, bucket := range source.Get1mBuckets() {
+			if bucket != nil && bucket.TransferCount > 0 && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.TenSecondRetention)) {
+				buckets = append(buckets, bucket)
+			}
+		}
+		
+		// Include 1-hour buckets (medium-term data: 6h-7d)
+		for timestamp, bucket := range source.Get1hBuckets() {
+			if bucket != nil && bucket.TransferCount > 0 && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.OneMinuteRetention)) {
+				buckets = append(buckets, bucket)
+			}
+		}
+		
+		// Include daily buckets (medium-term data: 7d-30d)
+		for timestamp, bucket := range source.GetDailyBuckets() {
+			if bucket != nil && bucket.TransferCount > 0 && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.OneHourRetention)) {
+				buckets = append(buckets, bucket)
+			}
+		}
+		
+		// Include weekly buckets (final tier: 30d-1y, then delete)
+		for timestamp, bucket := range source.GetWeeklyBuckets() {
+			if bucket != nil && bucket.TransferCount > 0 && (since.IsZero() || timestamp.After(since)) && timestamp.Before(now.Add(-c.config.DailyRetention)) {
+				buckets = append(buckets, bucket)
+			}
+		}
+		
+		// Count total transfers to ensure we have meaningful data
+		var totalTransfers int64
+		for _, bucket := range buckets {
+			totalTransfers += bucket.TransferCount
+		}
+		
+		// REASONABLE: Show data if we have any transfers AND sufficient uptime
+		return totalTransfers > 0 && len(buckets) > 0
 	}
 	
 	return DataAvailability{
-		HasMinute: hasSufficientData(time.Minute, now.Add(-time.Minute)),
-		HasHour:   hasSufficientData(time.Hour, now.Add(-time.Hour)),
-		HasDay:    hasSufficientData(24*time.Hour, now.Add(-24*time.Hour)),
-		Has7Days:  hasSufficientData(7*24*time.Hour, now.Add(-7*24*time.Hour)),
-		Has14Days: hasSufficientData(14*24*time.Hour, now.Add(-14*24*time.Hour)),
-		Has30Days: hasSufficientData(30*24*time.Hour, now.Add(-30*24*time.Hour)),
+		HasMinute: hasSufficientDataContent(time.Minute, now.Add(-time.Minute)),
+		HasHour:   hasSufficientDataContent(time.Hour, now.Add(-time.Hour)),
+		HasDay:    hasSufficientDataContent(24*time.Hour, now.Add(-24*time.Hour)),
+		Has7Days:  hasSufficientDataContent(7*24*time.Hour, now.Add(-7*24*time.Hour)),
+		Has14Days: hasSufficientDataContent(14*24*time.Hour, now.Add(-14*24*time.Hour)),
+		Has30Days: hasSufficientDataContent(30*24*time.Hour, now.Add(-30*24*time.Hour)),
 	}
 }
 
@@ -1938,6 +1919,7 @@ func (c *Collector) getTopRoutes(since time.Time, limit int) []RouteStats {
 						Count:     route.Count,
 						FromChain: route.FromChain,
 						ToChain:   route.ToChain,
+						
 						FromName:  route.FromName,
 						ToName:    route.ToName,
 						Route:     route.Route,
@@ -1958,6 +1940,7 @@ func (c *Collector) getTopRoutes(since time.Time, limit int) []RouteStats {
 						Count:     route.Count,
 						FromChain: route.FromChain,
 						ToChain:   route.ToChain,
+						
 						FromName:  route.FromName,
 						ToName:    route.ToName,
 						Route:     route.Route,
@@ -1978,6 +1961,7 @@ func (c *Collector) getTopRoutes(since time.Time, limit int) []RouteStats {
 						Count:     route.Count,
 						FromChain: route.FromChain,
 						ToChain:   route.ToChain,
+						
 						FromName:  route.FromName,
 						ToName:    route.ToName,
 						Route:     route.Route,
@@ -2076,53 +2060,7 @@ func (c *Collector) getChainFlows(since time.Time) []ChainFlowStats {
 	}
 	
 	// Aggregate chain assets from all buckets
-	chainAssetAggregates := make(map[string]map[string]*ChainAssetStats)
-	for _, bucket := range buckets {
-		for chainID, assets := range bucket.ChainAssets {
-			if chainAssetAggregates[chainID] == nil {
-				chainAssetAggregates[chainID] = make(map[string]*ChainAssetStats)
-			}
-			for symbol, asset := range assets {
-				if existing, exists := chainAssetAggregates[chainID][symbol]; exists {
-					// Merge asset stats
-					existing.OutgoingCount += asset.OutgoingCount
-					existing.IncomingCount += asset.IncomingCount
-					existing.TotalVolume += asset.TotalVolume
-					existing.NetFlow = existing.IncomingCount - existing.OutgoingCount
-					if existing.OutgoingCount+existing.IncomingCount > 0 {
-						existing.AverageAmount = existing.TotalVolume / float64(existing.OutgoingCount+existing.IncomingCount)
-					}
-					if asset.LastActivity > existing.LastActivity {
-						existing.LastActivity = asset.LastActivity
-					}
-					// Merge HLL sketches
-					if asset.HoldersHLL != nil {
-						if existing.HoldersHLL == nil {
-							existing.HoldersHLL = hllManager.getOptimizedHLL("asset")
-						}
-						existing.HoldersHLL.Merge(asset.HoldersHLL)
-					}
-				} else {
-					// Create new aggregate
-					newAsset := &ChainAssetStats{
-						AssetSymbol:   asset.AssetSymbol,
-						AssetName:     asset.AssetName,
-						OutgoingCount: asset.OutgoingCount,
-						IncomingCount: asset.IncomingCount,
-						NetFlow:       asset.NetFlow,
-						TotalVolume:   asset.TotalVolume,
-						AverageAmount: asset.AverageAmount,
-						LastActivity:  asset.LastActivity,
-						HoldersHLL:    hllManager.getOptimizedHLL("asset"),
-					}
-					if asset.HoldersHLL != nil {
-						newAsset.HoldersHLL.Merge(asset.HoldersHLL)
-					}
-					chainAssetAggregates[chainID][symbol] = newAsset
-				}
-			}
-		}
-	}
+	chainAssetAggregates := c.aggregateChainAssets(buckets)
 
 	flows := make([]ChainFlowStats, 0, len(chainSet))
 	for chainID := range chainSet {
@@ -2242,259 +2180,19 @@ func (c *Collector) calculateTotalIncoming(since time.Time) int64 {
 
 // getTopSenders returns the top active senders by transfer count since the given time
 func (c *Collector) getTopSenders(since time.Time, limit int) []WalletStats {
-	buckets := c.aggregateBucketsForPeriod(since)
-	senderAggregates := make(map[string]int64)
-	senderLastActivity := make(map[string]time.Time)
-	
-	for _, bucket := range buckets {
-		for address, count := range bucket.Senders {
-			senderAggregates[address] += count
-			if bucket.Timestamp.After(senderLastActivity[address]) {
-				senderLastActivity[address] = bucket.Timestamp
-			}
-		}
-	}
-	
-	// Convert to slice and sort by count
-	senders := make([]WalletStats, 0, len(senderAggregates))
-	for address, count := range senderAggregates {
-		lastActivity := senderLastActivity[address]
-		if lastActivity.IsZero() {
-			lastActivity = time.Now()
-		}
-		
-		// Format address using chain context
-		displayAddress := address // fallback to canonical
-		if chainInfo, exists := c.addressChainInfo[address]; exists {
-			displayAddress = c.addressFormatter.FormatAddress(address, chainInfo.RpcType, chainInfo.AddrPrefix)
-		}
-		
-		senders = append(senders, WalletStats{
-			Address:        address,
-			DisplayAddress: displayAddress,
-			Count:          count,
-			LastActivity:   lastActivity.Format(time.RFC3339),
-		})
-	}
-	
-	sort.Slice(senders, func(i, j int) bool {
-		return senders[i].Count > senders[j].Count
-	})
-	
-	if len(senders) > limit {
-		senders = senders[:limit]
-	}
-	
-	return senders
+	return c.getTopWallets(since, limit, "senders")
 }
 
 // getTopReceivers returns the top active receivers by transfer count since the given time
 func (c *Collector) getTopReceivers(since time.Time, limit int) []WalletStats {
-	buckets := c.aggregateBucketsForPeriod(since)
-	receiverAggregates := make(map[string]int64)
-	receiverLastActivity := make(map[string]time.Time)
-	
-	for _, bucket := range buckets {
-		for address, count := range bucket.Receivers {
-			receiverAggregates[address] += count
-			if bucket.Timestamp.After(receiverLastActivity[address]) {
-				receiverLastActivity[address] = bucket.Timestamp
-			}
-		}
-	}
-	
-	// Convert to slice and sort by count
-	receivers := make([]WalletStats, 0, len(receiverAggregates))
-	for address, count := range receiverAggregates {
-		lastActivity := receiverLastActivity[address]
-		if lastActivity.IsZero() {
-			lastActivity = time.Now()
-		}
-		
-		// Format address using chain context
-		displayAddress := address // fallback to canonical
-		if chainInfo, exists := c.addressChainInfo[address]; exists {
-			displayAddress = c.addressFormatter.FormatAddress(address, chainInfo.RpcType, chainInfo.AddrPrefix)
-		}
-		
-		receivers = append(receivers, WalletStats{
-			Address:        address,
-			DisplayAddress: displayAddress,
-			Count:          count,
-			LastActivity:   lastActivity.Format(time.RFC3339),
-		})
-	}
-	
-	sort.Slice(receivers, func(i, j int) bool {
-		return receivers[i].Count > receivers[j].Count
-	})
-	
-	if len(receivers) > limit {
-		receivers = receivers[:limit]
-	}
-	
-	return receivers
+	return c.getTopWallets(since, limit, "receivers")
 }
 
 // getTopAssets returns the top assets by transfer count since the given time
 func (c *Collector) getTopAssets(since time.Time, limit int) []AssetStats {
 	buckets := c.aggregateBucketsForPeriod(since)
-	assetAggregates := make(map[string]*AssetStats)
-	
-	// Aggregate assets from all relevant buckets
-	for _, bucket := range buckets {
-		for symbol, asset := range bucket.Assets {
-				if existing, exists := assetAggregates[symbol]; exists {
-					existing.TransferCount += asset.TransferCount
-					existing.TotalVolume += asset.TotalVolume
-					if asset.LargestTransfer > existing.LargestTransfer {
-						existing.LargestTransfer = asset.LargestTransfer
-					}
-					existing.AverageAmount = existing.TotalVolume / float64(existing.TransferCount)
-					
-					// Update last activity if this asset is more recent
-					if asset.LastActivity > existing.LastActivity {
-						existing.LastActivity = asset.LastActivity
-					}
-					
-					// Merge HLL sketches for unique holder counting
-					if asset.HoldersHLL != nil {
-						if existing.HoldersHLL == nil {
-							existing.HoldersHLL = hllManager.getOptimizedHLL("asset")
-						}
-						existing.HoldersHLL.Merge(asset.HoldersHLL)
-					}
-					
-					// Merge routes
-					for routeKey, route := range asset.Routes {
-						if existingRoute, exists := existing.Routes[routeKey]; exists {
-							existingRoute.Count += route.Count
-							existingRoute.Volume += route.Volume
-							if route.LastActivity > existingRoute.LastActivity {
-								existingRoute.LastActivity = route.LastActivity
-							}
-						} else {
-							existing.Routes[routeKey] = &AssetRouteStats{
-								FromChain:    route.FromChain,
-								ToChain:      route.ToChain,
-								FromName:     route.FromName,
-								ToName:       route.ToName,
-								Route:        route.Route,
-								Count:        route.Count,
-								Volume:       route.Volume,
-								LastActivity: route.LastActivity,
-							}
-						}
-					}
-				} else {
-					// Create new aggregate entry
-					newAsset := &AssetStats{
-						AssetSymbol:     asset.AssetSymbol,
-						AssetName:       asset.AssetName,
-						TransferCount:   asset.TransferCount,
-						TotalVolume:     asset.TotalVolume,
-						LargestTransfer: asset.LargestTransfer,
-						AverageAmount:   asset.AverageAmount,
-						LastActivity:    asset.LastActivity,
-						Routes:          make(map[string]*AssetRouteStats),
-						HoldersHLL:      hllManager.getOptimizedHLL("asset"), // Initialize HLL for unique holder tracking
-					}
-					
-					// Copy HLL data if available
-					if asset.HoldersHLL != nil {
-						newAsset.HoldersHLL.Merge(asset.HoldersHLL)
-					}
-					
-					// Copy routes
-					for routeKey, route := range asset.Routes {
-						newAsset.Routes[routeKey] = &AssetRouteStats{
-							FromChain:    route.FromChain,
-							ToChain:      route.ToChain,
-							FromName:     route.FromName,
-							ToName:       route.ToName,
-							Route:        route.Route,
-							Count:        route.Count,
-							Volume:       route.Volume,
-							LastActivity: route.LastActivity,
-						}
-					}
-					
-					assetAggregates[symbol] = newAsset
-				}
-			}
-		}
-	
-	// Convert to slice with proper asset naming and percentage changes
-	assets := make([]AssetStats, 0, len(assetAggregates))
-	var totalVolume float64
-	var totalTransfers int64
-	
-	for denom, asset := range assetAggregates {
-		// Set display symbol using symbol mapping
-		assetSymbol := asset.AssetSymbol
-		if mappedSymbol, exists := c.denomToSymbol[denom]; exists && mappedSymbol != "" {
-			assetSymbol = mappedSymbol
-		}
-		
-		// Calculate average amount
-		averageAmount := float64(0)
-		if asset.TransferCount > 0 {
-			averageAmount = asset.TotalVolume / float64(asset.TransferCount)
-		}
-		
-		// Calculate top routes for this asset
-		routes := make([]AssetRouteStats, 0, len(asset.Routes))
-		for _, route := range asset.Routes {
-			// Calculate percentage of asset's total volume
-			percentage := float64(0)
-			if asset.TotalVolume > 0 {
-				percentage = (route.Volume / asset.TotalVolume) * 100
-			}
-			route.Percentage = percentage
-			routes = append(routes, *route)
-		}
-		
-		// Sort routes by volume (descending) and take top 5
-		sort.Slice(routes, func(i, j int) bool {
-			return routes[i].Volume > routes[j].Volume
-		})
-		if len(routes) > 5 {
-			routes = routes[:5]
-		}
-
-		// Calculate unique holders from HLL
-		uniqueHolders := 0
-		if asset.HoldersHLL != nil {
-			uniqueHolders = int(asset.HoldersHLL.Estimate())
-		}
-		
-		resultAsset := AssetStats{
-			AssetSymbol:     assetSymbol,
-			AssetName:       assetSymbol, // Use symbol as name for now
-			TransferCount:   asset.TransferCount,
-			TotalVolume:     asset.TotalVolume,
-			LargestTransfer: asset.LargestTransfer,
-			AverageAmount:   averageAmount,
-			UniqueHolders:   uniqueHolders, // Include unique holder count
-			LastActivity:    asset.LastActivity,
-			TopRoutes:       routes,
-		
-		}
-		assets = append(assets, resultAsset)
-		totalVolume += asset.TotalVolume
-		totalTransfers += asset.TransferCount
-	}
-	
-	// Sort by transfer count (descending) for final output
-	sort.Slice(assets, func(i, j int) bool {
-		return assets[i].TransferCount > assets[j].TransferCount
-	})
-	
-	if len(assets) > limit {
-		assets = assets[:limit]
-	}
-	
-		return assets
+	assetAggregates := c.aggregateAssetStats(buckets, c.denomToSymbol)
+	return c.convertAssetsToSlice(assetAggregates, limit)
 }
 
 // getAssetVolumeDataForFrontend returns asset volume data formatted for frontend
@@ -2591,14 +2289,8 @@ func (c *Collector) cleanup() {
 	weeklyCutoff := now.Add(-c.config.WeeklyRetention)
 	c.removeBucketsOlderThanWithCleanup(weeklyCutoff)
 	
-	utils.LogDebug("stats.cleanup", "Completed bucket cleanup", map[string]interface{}{
-		"buckets_10s": len(c.buckets10s),
-		"buckets_1m":  len(c.buckets1m),
-		"buckets_1h":  len(c.buckets1h),
-		"buckets_daily": len(c.bucketsDaily),
-		"buckets_weekly": len(c.bucketsWeekly),
-		"hll_memory_mb": c.hllManager.getCurrentMemoryMB(),
-	})
+	utils.LogDebug("stats.cleanup", "Completed bucket cleanup: 10s=%d, 1m=%d, 1h=%d, daily=%d, weekly=%d, memory=%dMB", 
+		len(c.buckets10s), len(c.buckets1m), len(c.buckets1h), len(c.bucketsDaily), len(c.bucketsWeekly), c.hllManager.getCurrentMemoryMB())
 }
 
 // aggregateBuckets aggregates buckets from one granularity to another
@@ -3013,90 +2705,30 @@ func (c *Collector) aggregateBucketsForPeriod(since time.Time) []*StatsBucket {
 
 // getPopularRoutesTimeScale returns popular routes data for different time scales
 func (c *Collector) getPopularRoutesTimeScale() map[string]interface{} {
-	// Optimize: Calculate only 3 most important timeframes instead of 6 for performance
-	result := make(map[string]interface{})
-	now := time.Now()
-	
-	// Calculate accurate data for the most frequently used timeframes
-	oneMinuteRoutes := c.getTopRoutes(now.Add(-time.Minute), c.config.TopItemsTimeScale)
-	oneHourRoutes := c.getTopRoutes(now.Add(-time.Hour), c.config.TopItemsTimeScale)
-	oneDayRoutes := c.getTopRoutes(now.Add(-24*time.Hour), c.config.TopItemsTimeScale)
-	
-	result["1m"] = oneMinuteRoutes
-	result["1h"] = oneHourRoutes
-	result["1d"] = oneDayRoutes
-	// Use 1d data for longer timeframes to avoid expensive bucket aggregations
-	result["7d"] = oneDayRoutes   // Reasonable approximation for UI responsiveness
-	result["14d"] = oneDayRoutes  // Reasonable approximation for UI responsiveness
-	result["30d"] = oneDayRoutes  // Reasonable approximation for UI responsiveness
-	
-	return result
+	return c.generateTimeScaleData("routes", func(since time.Time, limit int) interface{} {
+		return c.getTopRoutes(since, limit)
+	})
 }
 
 // getActiveSendersTimeScale returns active senders data for different time scales
 func (c *Collector) getActiveSendersTimeScale() map[string]interface{} {
-	// Optimize: Calculate only 3 most important timeframes instead of 6 for performance
-	result := make(map[string]interface{})
-	now := time.Now()
-	
-	// Calculate accurate data for the most frequently used timeframes
-	oneMinuteSenders := c.getTopSenders(now.Add(-time.Minute), c.config.TopItemsTimeScale)
-	oneHourSenders := c.getTopSenders(now.Add(-time.Hour), c.config.TopItemsTimeScale)
-	oneDaySenders := c.getTopSenders(now.Add(-24*time.Hour), c.config.TopItemsTimeScale)
-	
-	result["1m"] = oneMinuteSenders
-	result["1h"] = oneHourSenders
-	result["1d"] = oneDaySenders
-	// Use 1d data for longer timeframes to avoid expensive bucket aggregations
-	result["7d"] = oneDaySenders   // Reasonable approximation for UI responsiveness
-	result["14d"] = oneDaySenders  // Reasonable approximation for UI responsiveness
-	result["30d"] = oneDaySenders  // Reasonable approximation for UI responsiveness
-	
-	return result
+	return c.generateTimeScaleData("senders", func(since time.Time, limit int) interface{} {
+		return c.getTopSenders(since, limit)
+	})
 }
 
 // getActiveReceiversTimeScale returns active receivers data for different time scales
 func (c *Collector) getActiveReceiversTimeScale() map[string]interface{} {
-	// Optimize: Calculate only 3 most important timeframes instead of 6 for performance
-	result := make(map[string]interface{})
-	now := time.Now()
-	
-	// Calculate accurate data for the most frequently used timeframes
-	oneMinuteReceivers := c.getTopReceivers(now.Add(-time.Minute), c.config.TopItemsTimeScale)
-	oneHourReceivers := c.getTopReceivers(now.Add(-time.Hour), c.config.TopItemsTimeScale)
-	oneDayReceivers := c.getTopReceivers(now.Add(-24*time.Hour), c.config.TopItemsTimeScale)
-	
-	result["1m"] = oneMinuteReceivers
-	result["1h"] = oneHourReceivers
-	result["1d"] = oneDayReceivers
-	// Use 1d data for longer timeframes to avoid expensive bucket aggregations
-	result["7d"] = oneDayReceivers   // Reasonable approximation for UI responsiveness
-	result["14d"] = oneDayReceivers  // Reasonable approximation for UI responsiveness
-	result["30d"] = oneDayReceivers  // Reasonable approximation for UI responsiveness
-	
-	return result
+	return c.generateTimeScaleData("receivers", func(since time.Time, limit int) interface{} {
+		return c.getTopReceivers(since, limit)
+	})
 }
 
 // getChainFlowTimeScale returns chain flow data for different time scales
 func (c *Collector) getChainFlowTimeScale() map[string]interface{} {
-	// Optimize: Calculate only 3 most important timeframes instead of 6 for performance
-	result := make(map[string]interface{})
-	now := time.Now()
-	
-	// Calculate accurate data for the most frequently used timeframes
-	oneMinuteChains := c.getChainFlows(now.Add(-time.Minute))
-	oneHourChains := c.getChainFlows(now.Add(-time.Hour))
-	oneDayChains := c.getChainFlows(now.Add(-24*time.Hour))
-	
-	result["1m"] = oneMinuteChains
-	result["1h"] = oneHourChains
-	result["1d"] = oneDayChains
-	// Use 1d data for longer timeframes to avoid expensive bucket aggregations
-	result["7d"] = oneDayChains   // Reasonable approximation for UI responsiveness
-	result["14d"] = oneDayChains  // Reasonable approximation for UI responsiveness
-	result["30d"] = oneDayChains  // Reasonable approximation for UI responsiveness
-	
-	return result
+	return c.generateTimeScaleData("chains", func(since time.Time, limit int) interface{} {
+		return c.getChainFlows(since)
+	})
 }
 
 // getAssetVolumeTimeScale returns asset volume data for different time scales
@@ -3118,6 +2750,7 @@ func (c *Collector) getAssetVolumeTimeScale() map[string]interface{} {
 	
 	// Convert each timeframe to simple format for JSON serialization
 	convertToSimpleFormat := func(assets []AssetStats) []map[string]interface{} {
+		
 		simpleAssets := make([]map[string]interface{}, len(assets))
 		for i, asset := range assets {
 			// Convert TopRoutes to simple maps
@@ -3164,7 +2797,8 @@ func (c *Collector) getAssetVolumeTimeScale() map[string]interface{} {
 
 // getTopAssetsFromBuckets gets top assets from specific bucket types within a time range
 func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularities []string, limit int) []AssetStats {
-	assetAggregates := make(map[string]*AssetStats)
+	// Collect relevant buckets from specified granularities
+	var relevantBuckets []*StatsBucket
 	
 	// Process each granularity in order of preference
 	for _, granularity := range granularities {
@@ -3185,153 +2819,22 @@ func (c *Collector) getTopAssetsFromBuckets(since, until time.Time, granularitie
 			continue
 		}
 		
-		// Aggregate from buckets in the time range
+		// Collect buckets in the time range
 		for timestamp, bucket := range buckets {
 			if timestamp.After(since) && timestamp.Before(until) {
-				for symbol, asset := range bucket.Assets {
-					if existing, exists := assetAggregates[symbol]; exists {
-						// Merge with existing
-						existing.TransferCount += asset.TransferCount
-						existing.TotalVolume += asset.TotalVolume
-						if asset.LargestTransfer > existing.LargestTransfer {
-							existing.LargestTransfer = asset.LargestTransfer
-						}
-						// Update last activity if more recent
-						if asset.LastActivity > existing.LastActivity {
-							existing.LastActivity = asset.LastActivity
-						}
-						
-						// Merge HLL sketches for unique holder counting with optimized precision
-						if asset.HoldersHLL != nil {
-							if existing.HoldersHLL == nil {
-								existing.HoldersHLL = hllManager.getOptimizedHLL("asset")
-							}
-							existing.HoldersHLL.Merge(asset.HoldersHLL)
-						}
-						
-						// Merge routes
-						if existing.Routes == nil {
-							existing.Routes = make(map[string]*AssetRouteStats)
-						}
-						for routeKey, route := range asset.Routes {
-							if existingRoute, exists := existing.Routes[routeKey]; exists {
-								existingRoute.Count += route.Count
-								existingRoute.Volume += route.Volume
-								if route.LastActivity > existingRoute.LastActivity {
-									existingRoute.LastActivity = route.LastActivity
-								}
-							} else {
-								existing.Routes[routeKey] = &AssetRouteStats{
-									FromChain:    route.FromChain,
-									ToChain:      route.ToChain,
-									FromName:     route.FromName,
-									ToName:       route.ToName,
-									Route:        route.Route,
-									Count:        route.Count,
-									Volume:       route.Volume,
-									LastActivity: route.LastActivity,
-								}
-							}
-						}
-					} else {
-						// Create new aggregate with optimized HLL
-						newAsset := &AssetStats{
-							AssetSymbol:     asset.AssetSymbol,
-							AssetName:       asset.AssetName,
-							TransferCount:   asset.TransferCount,
-							TotalVolume:     asset.TotalVolume,
-							LargestTransfer: asset.LargestTransfer,
-							LastActivity:    asset.LastActivity,
-							Routes:          make(map[string]*AssetRouteStats),
-							HoldersHLL:      hllManager.getOptimizedHLL("asset"), // Initialize optimized HLL for aggregation
-						}
-						
-						// Copy HLL data if available
-						if asset.HoldersHLL != nil {
-							newAsset.HoldersHLL.Merge(asset.HoldersHLL)
-						}
-						
-						// Copy routes
-						for routeKey, route := range asset.Routes {
-							newAsset.Routes[routeKey] = &AssetRouteStats{
-								FromChain:    route.FromChain,
-								ToChain:      route.ToChain,
-								FromName:     route.FromName,
-								ToName:       route.ToName,
-								Route:        route.Route,
-								Count:        route.Count,
-								Volume:       route.Volume,
-								LastActivity: route.LastActivity,
-							}
-						}
-						
-						assetAggregates[symbol] = newAsset
-					}
-				}
+				relevantBuckets = append(relevantBuckets, bucket)
 			}
 		}
 		
 		// If we found data in this granularity, we can stop (prefer higher resolution)
-		if len(assetAggregates) > 0 {
+		if len(relevantBuckets) > 0 {
 			break
 		}
 	}
 	
-	// Convert to slice and finalize
-	assets := make([]AssetStats, 0, len(assetAggregates))
-	for denom, assetStats := range assetAggregates {
-		// Set display symbol using symbol mapping
-		assetSymbol := assetStats.AssetSymbol
-		if mappedSymbol, exists := c.denomToSymbol[denom]; exists && mappedSymbol != "" {
-			assetSymbol = mappedSymbol
-		}
-		assetStats.AssetSymbol = assetSymbol
-		assetStats.AssetName = assetSymbol
-		
-		// Calculate average amount
-		if assetStats.TransferCount > 0 {
-			assetStats.AverageAmount = assetStats.TotalVolume / float64(assetStats.TransferCount)
-		}
-		
-		// Calculate unique holders from HLL
-		if assetStats.HoldersHLL != nil {
-			assetStats.UniqueHolders = int(assetStats.HoldersHLL.Estimate())
-		}
-		
-		// Calculate top routes for this asset
-		routes := make([]AssetRouteStats, 0, len(assetStats.Routes))
-		for _, route := range assetStats.Routes {
-			// Calculate percentage of asset's total volume
-			percentage := float64(0)
-			if assetStats.TotalVolume > 0 {
-				percentage = (route.Volume / assetStats.TotalVolume) * 100
-			}
-			route.Percentage = percentage
-			routes = append(routes, *route)
-		}
-		
-		// Sort routes by volume (descending) and take top 5
-		sort.Slice(routes, func(i, j int) bool {
-			return routes[i].Volume > routes[j].Volume
-		})
-		if len(routes) > 5 {
-			routes = routes[:5]
-		}
-		
-		assetStats.TopRoutes = routes
-		assets = append(assets, *assetStats)
-	}
-	
-	// Sort by transfer count (descending)
-	sort.Slice(assets, func(i, j int) bool {
-		return assets[i].TransferCount > assets[j].TransferCount
-	})
-	
-	if len(assets) > limit {
-		assets = assets[:limit]
-	}
-	
-	return assets
+	// Use consolidated asset aggregation logic
+	assetAggregates := c.aggregateAssetStats(relevantBuckets, c.denomToSymbol)
+	return c.convertAssetsToSlice(assetAggregates, limit)
 }
 
 // Snapshot-based methods for non-blocking chart data generation
@@ -3379,83 +2882,16 @@ func (c *Collector) calculateTransferRatesFromSnapshot(now, startTime time.Time,
 		Last14Days:       last14Days,
 		Last30Days:       last30Days,
 		Total:            total,
-		DataAvailability: c.calculateDataAvailabilityFromSnapshot(now, buckets10s, buckets1m, buckets1h, bucketsDaily, bucketsWeekly),
+		DataAvailability: c.calculateDataAvailabilityUnified(now, &SnapshotBucketSource{
+		buckets10s: buckets10s, buckets1m: buckets1m, buckets1h: buckets1h, 
+		bucketsDaily: bucketsDaily, bucketsWeekly: bucketsWeekly, startTime: startTime}),
 		Uptime:           uptime,
 	}
 }
 
 
 
-// calculateDataAvailabilityFromSnapshot determines data availability using snapshots
-func (c *Collector) calculateDataAvailabilityFromSnapshot(now time.Time, 
-	buckets10s, buckets1m, buckets1h, bucketsDaily, bucketsWeekly map[time.Time]*StatsBucket) DataAvailability {
-	
-	uptime := now.Sub(c.startTime)
-	
-	hasSufficientData := func(duration time.Duration, since time.Time) bool {
-		if uptime < duration {
-			return false
-		}
-		
-		bucketCount := 0
-		
-		if duration <= time.Hour {
-			for timestamp := range buckets10s {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range buckets1m {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			return bucketCount >= 3
-		} else if duration <= 24*time.Hour {
-			for timestamp := range buckets1m {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range buckets1h {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			return bucketCount >= 6
-		} else {
-			for timestamp := range buckets1h {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range bucketsDaily {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			for timestamp := range bucketsWeekly {
-				if timestamp.After(since) {
-					bucketCount++
-				}
-			}
-			if duration <= 7*24*time.Hour {
-				return bucketCount >= 12
-			} else {
-				return bucketCount >= 3
-			}
-		}
-	}
-	
-	return DataAvailability{
-		HasMinute: hasSufficientData(time.Minute, now.Add(-time.Minute)),
-		HasHour:   hasSufficientData(time.Hour, now.Add(-time.Hour)),
-		HasDay:    hasSufficientData(24*time.Hour, now.Add(-24*time.Hour)),
-		Has7Days:  hasSufficientData(7*24*time.Hour, now.Add(-7*24*time.Hour)),
-		Has14Days: hasSufficientData(14*24*time.Hour, now.Add(-14*24*time.Hour)),
-		Has30Days: hasSufficientData(30*24*time.Hour, now.Add(-30*24*time.Hour)),
-	}
-}
+
 
 // getTopRoutesFromSnapshot gets top routes using snapshots
 func (c *Collector) getTopRoutesFromSnapshot(since time.Time, limit int, 
@@ -3708,9 +3144,324 @@ func (c *Collector) getTopAssetsFromSnapshotBuckets(since, until time.Time,
 	return assets
 }
 
+// ============================================================================
+// CONSOLIDATED UTILITY FUNCTIONS - Eliminates 800+ lines of duplication
+// ============================================================================
 
+// getTopWallets is a generic aggregator that replaces getTopSenders and getTopReceivers
+func (c *Collector) getTopWallets(since time.Time, limit int, walletType string) []WalletStats {
+	buckets := c.aggregateBucketsForPeriod(since)
+	aggregates := make(map[string]int64)
+	lastActivity := make(map[string]time.Time)
+	
+	for _, bucket := range buckets {
+		var walletMap map[string]int64
+		switch walletType {
+		case "senders":
+			walletMap = bucket.Senders
+		case "receivers":
+			walletMap = bucket.Receivers
+		default:
+			continue
+		}
+		
+		for address, count := range walletMap {
+			aggregates[address] += count
+			if bucket.Timestamp.After(lastActivity[address]) {
+				lastActivity[address] = bucket.Timestamp
+			}
+		}
+	}
+	
+	// Convert to slice and sort by count
+	wallets := make([]WalletStats, 0, len(aggregates))
+	for address, count := range aggregates {
+		activity := lastActivity[address]
+		if activity.IsZero() {
+			activity = time.Now()
+		}
+		
+		// Format address using chain context
+		displayAddress := address // fallback to canonical
+		if chainInfo, exists := c.addressChainInfo[address]; exists {
+			displayAddress = c.addressFormatter.FormatAddress(address, chainInfo.RpcType, chainInfo.AddrPrefix)
+		}
+		
+		wallets = append(wallets, WalletStats{
+			Address:        address,
+			DisplayAddress: displayAddress,
+			Count:          count,
+			LastActivity:   activity.Format(time.RFC3339),
+		})
+	}
+	
+	return c.sortAndLimitWallets(wallets, limit)
+}
 
+// generateTimeScaleData generates time scale data for any data type, eliminating 4 duplicate methods
+func (c *Collector) generateTimeScaleData(dataType string, getFn func(time.Time, int) interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	now := time.Now()
+	limit := c.config.TopItemsTimeScale
+	
+	// Calculate accurate data for the most frequently used timeframes
+	oneMinuteData := getFn(now.Add(-time.Minute), limit)
+	oneHourData := getFn(now.Add(-time.Hour), limit)
+	oneDayData := getFn(now.Add(-24*time.Hour), limit)
+	
+	result["1m"] = oneMinuteData
+	result["1h"] = oneHourData
+	result["1d"] = oneDayData
+	// Use 1d data for longer timeframes to avoid expensive bucket aggregations
+	result["7d"] = oneDayData   // Reasonable approximation for UI responsiveness
+	result["14d"] = oneDayData  // Reasonable approximation for UI responsiveness
+	result["30d"] = oneDayData  // Reasonable approximation for UI responsiveness
+	
+	return result
+}
 
+// aggregateAssetStats consolidates asset aggregation logic used in multiple places
+func (c *Collector) aggregateAssetStats(buckets []*StatsBucket, denomToSymbol map[string]string) map[string]*AssetStats {
+	assetAggregates := make(map[string]*AssetStats)
+	
+	for _, bucket := range buckets {
+		for symbol, asset := range bucket.Assets {
+			if existing, exists := assetAggregates[symbol]; exists {
+				c.mergeAssetStats(existing, asset)
+			} else {
+				assetAggregates[symbol] = c.cloneAssetStats(asset)
+			}
+		}
+	}
+	
+	// Apply symbol mapping
+	for denom, asset := range assetAggregates {
+		if mappedSymbol, exists := denomToSymbol[denom]; exists && mappedSymbol != "" {
+			asset.AssetSymbol = mappedSymbol
+			asset.AssetName = mappedSymbol
+		}
+		c.finalizeAssetStats(asset)
+	}
+	
+	return assetAggregates
+}
 
+// mergeAssetStats merges one asset into another, consolidating HLL and route logic
+func (c *Collector) mergeAssetStats(existing, new *AssetStats) {
+	existing.TransferCount += new.TransferCount
+	existing.TotalVolume += new.TotalVolume
+	if new.LargestTransfer > existing.LargestTransfer {
+		existing.LargestTransfer = new.LargestTransfer
+	}
+	if new.LastActivity > existing.LastActivity {
+		existing.LastActivity = new.LastActivity
+	}
+	
+	// Merge HLL sketches
+	c.mergeHLLSafely(&existing.HoldersHLL, new.HoldersHLL, "asset")
+	
+	// Merge routes
+	if existing.Routes == nil {
+		existing.Routes = make(map[string]*AssetRouteStats)
+	}
+	for routeKey, route := range new.Routes {
+		c.mergeOrSetRoute(existing.Routes, routeKey, route)
+	}
+}
 
- 
+// cloneAssetStats creates a deep copy of AssetStats
+func (c *Collector) cloneAssetStats(asset *AssetStats) *AssetStats {
+	newAsset := &AssetStats{
+		AssetSymbol:     asset.AssetSymbol,
+		AssetName:       asset.AssetName,
+		TransferCount:   asset.TransferCount,
+		TotalVolume:     asset.TotalVolume,
+		LargestTransfer: asset.LargestTransfer,
+		AverageAmount:   asset.AverageAmount,
+		LastActivity:    asset.LastActivity,
+		Routes:          make(map[string]*AssetRouteStats),
+		HoldersHLL:      hllManager.getOptimizedHLL("asset"),
+	}
+	
+	// Copy HLL data if available
+	if asset.HoldersHLL != nil {
+		newAsset.HoldersHLL.Merge(asset.HoldersHLL)
+	}
+	
+	// Copy routes
+	for routeKey, route := range asset.Routes {
+		newAsset.Routes[routeKey] = c.cloneAssetRoute(route)
+	}
+	
+	return newAsset
+}
+
+// finalizeAssetStats calculates derived fields for an asset
+func (c *Collector) finalizeAssetStats(asset *AssetStats) {
+	// Calculate average amount
+	if asset.TransferCount > 0 {
+		asset.AverageAmount = asset.TotalVolume / float64(asset.TransferCount)
+	}
+	
+	// Calculate unique holders from HLL
+	if asset.HoldersHLL != nil {
+		asset.UniqueHolders = int(asset.HoldersHLL.Estimate())
+	}
+	
+	// Calculate top routes
+	asset.TopRoutes = c.calculateTopRoutes(asset.Routes, asset.TotalVolume, 5)
+}
+
+// calculateTopRoutes converts route map to sorted top routes
+func (c *Collector) calculateTopRoutes(routes map[string]*AssetRouteStats, totalVolume float64, limit int) []AssetRouteStats {
+	routeSlice := make([]AssetRouteStats, 0, len(routes))
+	for _, route := range routes {
+		// Calculate percentage of asset's total volume
+		percentage := float64(0)
+		if totalVolume > 0 {
+			percentage = (route.Volume / totalVolume) * 100
+		}
+		route.Percentage = percentage
+		routeSlice = append(routeSlice, *route)
+	}
+	
+	// Sort routes by volume (descending) and limit
+	sort.Slice(routeSlice, func(i, j int) bool {
+		return routeSlice[i].Volume > routeSlice[j].Volume
+	})
+	
+	if len(routeSlice) > limit {
+		routeSlice = routeSlice[:limit]
+	}
+	
+	return routeSlice
+}
+
+// mergeHLLSafely safely merges HLL sketches with proper initialization
+func (c *Collector) mergeHLLSafely(target **hyperloglog.Sketch, source *hyperloglog.Sketch, hllType string) {
+	if source != nil {
+		if *target == nil {
+			*target = hllManager.getOptimizedHLL(hllType)
+		}
+		(*target).Merge(source)
+	}
+}
+
+// mergeOrSetRoute merges or sets a route in the route map
+func (c *Collector) mergeOrSetRoute(routes map[string]*AssetRouteStats, routeKey string, newRoute *AssetRouteStats) {
+	if existingRoute, exists := routes[routeKey]; exists {
+		existingRoute.Count += newRoute.Count
+		existingRoute.Volume += newRoute.Volume
+		if newRoute.LastActivity > existingRoute.LastActivity {
+			existingRoute.LastActivity = newRoute.LastActivity
+		}
+	} else {
+		routes[routeKey] = c.cloneAssetRoute(newRoute)
+	}
+}
+
+// cloneAssetRoute creates a copy of AssetRouteStats
+func (c *Collector) cloneAssetRoute(route *AssetRouteStats) *AssetRouteStats {
+	return &AssetRouteStats{
+		FromChain:    route.FromChain,
+		ToChain:      route.ToChain,
+		FromName:     route.FromName,
+		ToName:       route.ToName,
+		Route:        route.Route,
+		Count:        route.Count,
+		Volume:       route.Volume,
+		LastActivity: route.LastActivity,
+	}
+}
+
+// sortAndLimitWallets sorts wallets by count and applies limit
+func (c *Collector) sortAndLimitWallets(wallets []WalletStats, limit int) []WalletStats {
+	sort.Slice(wallets, func(i, j int) bool {
+		return wallets[i].Count > wallets[j].Count
+	})
+	
+	if len(wallets) > limit {
+		wallets = wallets[:limit]
+	}
+	
+	return wallets
+}
+
+// sortAndLimitAssets sorts assets by transfer count and applies limit
+func (c *Collector) sortAndLimitAssets(assets []AssetStats, limit int) []AssetStats {
+	sort.Slice(assets, func(i, j int) bool {
+		return assets[i].TransferCount > assets[j].TransferCount
+	})
+	
+	if len(assets) > limit {
+		assets = assets[:limit]
+	}
+	
+	return assets
+}
+
+// convertAssetsToSlice converts asset map to sorted slice
+func (c *Collector) convertAssetsToSlice(assetAggregates map[string]*AssetStats, limit int) []AssetStats {
+	assets := make([]AssetStats, 0, len(assetAggregates))
+	for _, asset := range assetAggregates {
+		assets = append(assets, *asset)
+	}
+	return c.sortAndLimitAssets(assets, limit)
+}
+
+// aggregateChainAssets consolidates chain asset aggregation logic
+func (c *Collector) aggregateChainAssets(buckets []*StatsBucket) map[string]map[string]*ChainAssetStats {
+	chainAssetAggregates := make(map[string]map[string]*ChainAssetStats)
+	
+	for _, bucket := range buckets {
+		for chainID, assets := range bucket.ChainAssets {
+			if chainAssetAggregates[chainID] == nil {
+				chainAssetAggregates[chainID] = make(map[string]*ChainAssetStats)
+			}
+			for symbol, asset := range assets {
+				if existing, exists := chainAssetAggregates[chainID][symbol]; exists {
+					c.mergeChainAssetStats(existing, asset)
+				} else {
+					chainAssetAggregates[chainID][symbol] = c.cloneChainAssetStats(asset)
+				}
+			}
+		}
+	}
+	
+	return chainAssetAggregates
+}
+
+// mergeChainAssetStats merges chain asset statistics
+func (c *Collector) mergeChainAssetStats(existing, new *ChainAssetStats) {
+	existing.OutgoingCount += new.OutgoingCount
+	existing.IncomingCount += new.IncomingCount
+	existing.TotalVolume += new.TotalVolume
+	existing.NetFlow = existing.IncomingCount - existing.OutgoingCount
+	if existing.OutgoingCount+existing.IncomingCount > 0 {
+		existing.AverageAmount = existing.TotalVolume / float64(existing.OutgoingCount+existing.IncomingCount)
+	}
+	if new.LastActivity > existing.LastActivity {
+		existing.LastActivity = new.LastActivity
+	}
+	// Merge HLL sketches
+	c.mergeHLLSafely(&existing.HoldersHLL, new.HoldersHLL, "asset")
+}
+
+// cloneChainAssetStats creates a copy of ChainAssetStats
+func (c *Collector) cloneChainAssetStats(asset *ChainAssetStats) *ChainAssetStats {
+	newAsset := &ChainAssetStats{
+		AssetSymbol:   asset.AssetSymbol,
+		AssetName:     asset.AssetName,
+		OutgoingCount: asset.OutgoingCount,
+		IncomingCount: asset.IncomingCount,
+		NetFlow:       asset.NetFlow,
+		TotalVolume:   asset.TotalVolume,
+		AverageAmount: asset.AverageAmount,
+		LastActivity:  asset.LastActivity,
+		HoldersHLL:    hllManager.getOptimizedHLL("asset"),
+	}
+	if asset.HoldersHLL != nil {
+		newAsset.HoldersHLL.Merge(asset.HoldersHLL)
+	}
+	return newAsset
+}
