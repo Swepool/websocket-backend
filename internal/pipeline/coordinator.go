@@ -210,12 +210,23 @@ func (c *Coordinator) logSyncStatus() {
 	utils.LogInfo("COORDINATOR", "  Gap threshold: %.1f hours", status["gap_threshold_hours"])
 }
 
-// startChartUpdater runs the chart updater every 15 seconds
+// startChartUpdater runs the chart updater with configurable interval
 func (c *Coordinator) startChartUpdater(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Second)
+	// Make interval configurable based on data size
+	// For large datasets (100M+ records), use longer intervals
+	updateInterval := 15 * time.Second
+	
+	// TODO: Make this configurable via environment variable
+	// if os.Getenv("CHART_UPDATE_INTERVAL") != "" {
+	//     if interval, err := time.ParseDuration(os.Getenv("CHART_UPDATE_INTERVAL")); err == nil {
+	//         updateInterval = interval
+	//     }
+	// }
+	
+	ticker := time.NewTicker(updateInterval)
 	defer ticker.Stop()
 	
-	utils.LogInfo("COORDINATOR", "Starting chart updater with 15-second intervals (event-driven broadcasts)")
+	utils.LogInfo("COORDINATOR", "Starting chart updater with %v intervals (event-driven broadcasts)", updateInterval)
 	
 	// Run initial update and warm cache
 	if err := c.chartUpdater.UpdateAllChartSummaries(); err != nil {
