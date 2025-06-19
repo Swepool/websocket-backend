@@ -2,7 +2,6 @@ package database
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 	"websocket-backend-new/internal/utils"
@@ -20,32 +19,11 @@ func NewPostgreSQLChartUpdater(db *sql.DB) *PostgreSQLChartUpdater {
 
 // UpdateAllChartSummaries updates chart summaries using PostgreSQL syntax
 func (u *PostgreSQLChartUpdater) UpdateAllChartSummaries() error {
-	timeScales := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
-	now := time.Now()
-	
-	for _, timeScale := range timeScales {
-		var since time.Time
-		switch timeScale {
-		case "1m":
-			since = now.Add(-time.Minute)
-		case "1h":
-			since = now.Add(-time.Hour)
-		case "1d":
-			since = now.Add(-24 * time.Hour)
-		case "7d":
-			since = now.Add(-7 * 24 * time.Hour)
-		case "14d":
-			since = now.Add(-14 * 24 * time.Hour)
-		case "30d":
-			since = now.Add(-30 * 24 * time.Hour)
-		}
-		
-		// Since we have materialized views, we can simply refresh them
-		// instead of manually updating each chart type
-		if err := u.refreshMaterializedViews(); err != nil {
-			utils.LogError("POSTGRESQL_CHART_UPDATER", "Failed to refresh materialized views: %v", err)
-			return err
-		}
+	// Since we have materialized views, we can simply refresh them
+	// instead of manually updating each chart type
+	if err := u.refreshMaterializedViews(); err != nil {
+		utils.LogError("POSTGRESQL_CHART_UPDATER", "Failed to refresh materialized views: %v", err)
+		return err
 	}
 	
 	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "All materialized views refreshed successfully")
@@ -129,14 +107,6 @@ func (u *PostgreSQLChartUpdater) updateWalletStats(timeScale string, since time.
 		uniqueTotal = uniqueSenders + uniqueReceivers
 	}
 	
-	walletStats := map[string]interface{}{
-		"uniqueSenders":   uniqueSenders,
-		"uniqueReceivers": uniqueReceivers,
-		"uniqueTotal":     uniqueTotal,
-		"timeScale":       timeScale,
-		"calculatedAt":    time.Now().Format(time.RFC3339),
-	}
-	
 	// For now, we rely on materialized views instead of manual storage
 	// This method is kept for compatibility but not actively used
 	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "Wallet stats: %d senders, %d receivers, %d total", 
@@ -145,10 +115,4 @@ func (u *PostgreSQLChartUpdater) updateWalletStats(timeScale string, since time.
 	return nil
 }
 
-// Helper function
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-} 
+ 

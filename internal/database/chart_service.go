@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 	"websocket-backend-new/models"
@@ -559,7 +558,13 @@ func getPreviousTimeScale(current string) string {
 	}
 }
 
-
+// Helper function for min calculation
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 // SetLatencyData updates the stored latency data (called by latency callback)
 func (c *EnhancedChartService) SetLatencyData(data []models.LatencyData) {

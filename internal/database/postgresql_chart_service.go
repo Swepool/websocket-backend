@@ -22,27 +22,22 @@ func NewPostgreSQLChartService(db *sql.DB) *PostgreSQLChartService {
 // Replaces: 12+ expensive COUNT queries with 1 fast materialized view lookup
 func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRates, error) {
 	rates := FrontendTransferRates{
-		DataAvailability: map[string]bool{
-			"hasMinute": true, "hasHour": true, "hasDay": true,
-			"has7Days": true, "has14Days": true, "has30Days": true,
-		},
-		ServerUptimeSeconds: time.Since(time.Now().Add(-time.Hour)).Seconds(),
+		LastUpdateTime: time.Now(),
 	}
 	
 	// Single fast query instead of 6+ expensive COUNT operations
 	rows, err := p.db.Query(`
 		SELECT period, count 
 		FROM transfer_rates 
-		WHERE period IN ('all', '1m', '1h', '1d', '7d', '14d', '30d')
+		WHERE period IN ('all', '1m', '5m', '15m', '1h', '24h')
 		ORDER BY 
 			CASE period 
 				WHEN 'all' THEN 1 
-				WHEN '30d' THEN 2 
-				WHEN '14d' THEN 3 
-				WHEN '7d' THEN 4 
-				WHEN '1d' THEN 5 
-				WHEN '1h' THEN 6 
-				WHEN '1m' THEN 7 
+				WHEN '24h' THEN 2 
+				WHEN '1h' THEN 3 
+				WHEN '15m' THEN 4 
+				WHEN '5m' THEN 5 
+				WHEN '1m' THEN 6 
 			END`)
 	
 	if err != nil {
@@ -57,33 +52,33 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 			continue
 		}
 		
+		// Calculate estimated rate (per minute)
+		duration := map[string]float64{
+			"1m": 1, "5m": 5, "15m": 15, "1h": 60, "24h": 1440,
+		}
+		
 		switch period {
 		case "all":
 			rates.TotalTracked = count
 		case "1m":
-			rates.TxPerMinute = float64(count)
+			rates.Last1Min = count
+			rates.EstimatedRate1Min = float64(count) / duration[period]
+		case "5m":
+			rates.Last5Min = count
+			rates.EstimatedRate5Min = float64(count) / duration[period]
+		case "15m":
+			rates.Last15Min = count
+			rates.EstimatedRate15Min = float64(count) / duration[period]
 		case "1h":
-			rates.TxPerHour = float64(count)
-		case "1d":
-			rates.TxPerDay = float64(count)
-		case "7d":
-			rates.TxPer7Days = float64(count)
-		case "14d":
-			rates.TxPer14Days = float64(count)
-		case "30d":
-			rates.TxPer30Days = float64(count)
+			rates.Last1Hour = count
+			rates.EstimatedRate1Hour = float64(count) / duration[period]
+		case "24h":
+			rates.Last24Hours = count
+			rates.EstimatedRate24Hours = float64(count) / duration[period]
 		}
 	}
 	
-	// Get unique senders/receivers from wallet_stats materialized view (FAST)
-	err = p.db.QueryRow(`
-		SELECT unique_senders, unique_receivers 
-		FROM wallet_stats 
-		WHERE period = '1d'`).Scan(&rates.UniqueSendersTotal, &rates.UniqueReceiversTotal)
-	
-	if err != nil {
-		utils.LogWarn("POSTGRESQL_CHART", "Failed to get unique wallet counts: %v", err)
-	}
+
 	
 	// TODO: Calculate percentage changes from previous periods
 	// This would require storing previous period data in materialized views
@@ -96,10 +91,9 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 // Replaces: 18+ expensive COUNT DISTINCT queries with 1 fast lookup
 func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTransferRates) map[string]interface{} {
 	result := map[string]interface{}{
-		"dataAvailability":     rates.DataAvailability,
-		"serverUptimeSeconds":  rates.ServerUptimeSeconds,
-		"uniqueSendersTotal":   rates.UniqueSendersTotal,
-		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
+		"dataAvailable":    true,
+		"serverUptime":     time.Since(time.Now().Add(-time.Hour)).Seconds(),
+		"lastUpdateTime":   rates.LastUpdateTime,
 	}
 	
 	// Single fast query instead of 18+ expensive UNION/COUNT DISTINCT operations
@@ -396,7 +390,6 @@ func (p *PostgreSQLChartService) GetChartDataOptimized() (map[string]interface{}
 			},
 			"totalOutgoing":      totalOutgoing,
 			"totalIncoming":      totalIncoming,
-			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
 		},
 		"assetVolumeData": map[string]interface{}{
 			"assets": assetVolumes,
@@ -406,11 +399,9 @@ func (p *PostgreSQLChartService) GetChartDataOptimized() (map[string]interface{}
 			"totalAssets":         totalAssets,
 			"totalVolume":         totalVolume,
 			"totalTransfers":      totalTransfers,
-			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
 		},
 		"latencyData":       []interface{}{}, // Will be handled separately
 		"nodeHealthData":    map[string]interface{}{}, // Will be handled separately
-		"dataAvailability":  transferRates.DataAvailability,
 		"timestamp":         now,
 	}
 	
