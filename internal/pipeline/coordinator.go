@@ -14,14 +14,14 @@ import (
 	"websocket-backend-new/internal/utils"
 )
 
-// Coordinator manages the entire simplified pipeline with enhanced chart system and bidirectional sync
+// Coordinator manages the entire simplified pipeline with PostgreSQL-optimized chart system
 type Coordinator struct {
 	syncManager     *fetcher.SyncManager  // Replaced fetcher with SyncManager
 	processor       *processor.Processor
 	scheduler       *scheduler.Scheduler
 	broadcaster     broadcaster.BroadcasterInterface
 	dbWriter        *database.Writer
-	chartService    *database.EnhancedChartService
+	chartService    *database.PostgreSQLChartService  // Always use PostgreSQL optimized service
 	chartUpdater    interface{ UpdateAllChartSummaries() error }
 	chartBroadcaster *database.ChartBroadcaster
 	
@@ -57,28 +57,16 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 	p := processor.NewProcessor(config.Processor, ch)
 	s := scheduler.NewScheduler(config.Scheduler, ch)
 	
-	// Create optimized chart service based on database type
-	var chartService *database.EnhancedChartService
-	
-	// Detect PostgreSQL by testing the actual database connection
-	isPostgreSQL := database.IsPostgreSQL(dbWriter.GetDB())
-	
-	utils.LogInfo("COORDINATOR", "🔍 Runtime database detection: PostgreSQL=%t", isPostgreSQL)
-	utils.LogInfo("COORDINATOR", "📋 Database initialized successfully")
-	
-	// Use PostgreSQL-optimized chart service with materialized views (ULTRA FAST)
-	pgChartService := database.NewPostgreSQLChartService(dbWriter.GetDB())
-	utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart service with materialized views")
+	// Always use PostgreSQL-optimized chart service (ULTRA FAST)
+	chartService := database.NewPostgreSQLChartService(dbWriter.GetDB())
+	utils.LogInfo("COORDINATOR", "🚀 Always using PostgreSQL-optimized chart service with materialized views")
 	
 	// Check materialized view status
-	if status, err := pgChartService.GetMaterializedViewStatus(); err == nil {
+	if status, err := chartService.GetMaterializedViewStatus(); err == nil {
 		utils.LogInfo("COORDINATOR", "📊 Materialized view status: %+v", status)
 	}
 	
-	// Create a wrapper to make PostgreSQL service compatible with existing interface
-	chartService = database.NewEnhancedChartServiceWithPostgreSQL(dbWriter.GetDB(), pgChartService)
-	
-	utils.LogInfo("COORDINATOR", "✅ PostgreSQL optimizations active")
+	utils.LogInfo("COORDINATOR", "✅ PostgreSQL ultra-optimizations active")
 	
 	// Load existing latency data from database on startup
 	if err := chartService.LoadLatencyDataFromDB(); err != nil {
@@ -265,8 +253,8 @@ func (c *Coordinator) startChartUpdater(ctx context.Context) {
 	}
 }
 
-// GetChartService returns the enhanced chart service for API endpoints
-func (c *Coordinator) GetChartService() *database.EnhancedChartService {
+// GetChartService returns the PostgreSQL chart service for API endpoints
+func (c *Coordinator) GetChartService() *database.PostgreSQLChartService {
 	return c.chartService
 }
 

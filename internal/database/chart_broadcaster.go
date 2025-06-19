@@ -7,13 +7,13 @@ import (
 
 // ChartBroadcaster handles broadcasting chart data updates via WebSocket
 type ChartBroadcaster struct {
-	chartService *EnhancedChartService
+	chartService *PostgreSQLChartService
 	broadcaster  broadcaster.BroadcasterInterface
 	stopCh       chan struct{}
 }
 
 // NewChartBroadcaster creates a new chart broadcaster
-func NewChartBroadcaster(chartService *EnhancedChartService, broadcasterInstance broadcaster.BroadcasterInterface) *ChartBroadcaster {
+func NewChartBroadcaster(chartService *PostgreSQLChartService, broadcasterInstance broadcaster.BroadcasterInterface) *ChartBroadcaster {
 	return &ChartBroadcaster{
 		chartService: chartService,
 		broadcaster:  broadcasterInstance,

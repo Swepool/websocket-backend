@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 	"websocket-backend-new/internal/utils"
+	"websocket-backend-new/models"
 )
 
 // PostgreSQLChartService provides ultra-fast chart data using materialized views
@@ -21,8 +22,24 @@ func NewPostgreSQLChartService(db *sql.DB) *PostgreSQLChartService {
 // GetTransferRatesOptimized gets transfer rates from materialized view (FAST)
 // Replaces: Multiple COUNT queries with 1 fast lookup
 func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRates, error) {
+	// Get the actual data timestamp range (not current time!)
+	var totalRecords int64
+	var minTimestamp, maxTimestamp int64
+	var err error
+	p.db.QueryRow("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM transfers").Scan(&totalRecords, &minTimestamp, &maxTimestamp)
+	
+	minTime := time.Unix(minTimestamp, 0)
+	maxTime := time.Unix(maxTimestamp, 0)
+	dataSpan := maxTime.Sub(minTime)
+	
+	utils.LogInfo("POSTGRESQL_CHART", "📊 DATA ANALYSIS: %d total records | Span: %v (%0.1f hours) | From: %s | To: %s", 
+		totalRecords, dataSpan, dataSpan.Hours(), minTime.Format("2006-01-02 15:04:05"), maxTime.Format("2006-01-02 15:04:05"))
+	
+	// Use the most recent transfer timestamp as our reference point (not current time!)
+	dataEndTime := maxTime
+	
 	rates := FrontendTransferRates{
-		LastUpdateTime: time.Now(),
+		LastUpdateTime: dataEndTime, // Use actual data timeline
 		DataAvailability: DataAvailability{
 			HasMinute: true,
 			HasHour:   true,
@@ -31,41 +48,11 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 			Has14Days: true,
 			Has30Days: true,
 		},
-		ServerUptimeSeconds: time.Since(time.Now().Add(-time.Hour)).Seconds(),
+		ServerUptimeSeconds: time.Since(dataEndTime.Add(-time.Hour)).Seconds(),
 	}
 	
 	// Single fast query from materialized view for all periods
-	rows, err := p.db.Query(`
-		SELECT period, count 
-		FROM transfer_rates 
-		WHERE period IN ('1m', '1h', '1d', '7d', '14d', '30d')
-		ORDER BY 
-			CASE period 
-				WHEN '30d' THEN 1 
-				WHEN '14d' THEN 2 
-				WHEN '7d' THEN 3 
-				WHEN '1d' THEN 4 
-				WHEN '1h' THEN 5 
-				WHEN '1m' THEN 6 
-			END`)
-	
-	if err != nil {
-		return rates, fmt.Errorf("failed to query transfer rates: %w", err)
-	}
-	defer rows.Close()
-	
-	periodCounts := make(map[string]int64)
-	
-	for rows.Next() {
-		var period string
-		var count int64
-		if err := rows.Scan(&period, &count); err != nil {
-			continue
-		}
-		periodCounts[period] = count
-	}
-	
-	// Calculate current period counts and percentage changes
+	// Calculate period counts using actual data timeline (not materialized views that might be outdated)
 	periods := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
 	durations := map[string]time.Duration{
 		"1m":  time.Minute,
@@ -76,6 +63,23 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		"30d": 30 * 24 * time.Hour,
 	}
 	
+	periodCounts := make(map[string]int64)
+	for _, period := range periods {
+		duration := durations[period]
+		since := dataEndTime.Add(-duration)
+		
+		var currentCount int64
+		err := p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", since.Unix()).Scan(&currentCount)
+		if err != nil {
+			currentCount = 0
+		}
+		periodCounts[period] = currentCount
+		
+		utils.LogInfo("POSTGRESQL_CHART", "📈 Period %s: %d transfers from %s to %s", 
+			period, currentCount, since.Format("2006-01-02 15:04:05"), dataEndTime.Format("2006-01-02 15:04:05"))
+	}
+	
+	// Calculate current period counts and percentage changes
 	now := time.Now()
 	
 	for _, period := range periods {
@@ -87,7 +91,8 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		prevUntil := now.Add(-duration)
 		
 		var prevCount int64
-		err := p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+		var err error
+		err = p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
 			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
 		if err != nil {
 			prevCount = 0
@@ -98,24 +103,38 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		if period == "1m" {
 			// For minute data, compare against 5-minute average (more stable)
 			var avgPrevCount int64
-			err := p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				time.Now().Add(-6*time.Minute).Unix(), time.Now().Add(-time.Minute).Unix()).Scan(&avgPrevCount)
+			err = p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				dataEndTime.Add(-6*time.Minute).Unix(), dataEndTime.Add(-time.Minute).Unix()).Scan(&avgPrevCount)
 			if err == nil && avgPrevCount > 0 {
 				avgPrev := float64(avgPrevCount) / 5.0
 				if avgPrev > 0 {
 					percentageChange = ((float64(currentCount) - avgPrev) / avgPrev) * 100
 				}
 			}
+			utils.LogInfo("POSTGRESQL_CHART", "🔍 %s Previous avg query (5min): %d records, change=%.1f%%", 
+				period, avgPrevCount, percentageChange)
 		} else if period == "1h" {
 			// For hourly data, use previous hour comparison
-			if prevCount > 0 {
+			prevSince := dataEndTime.Add(-2*time.Hour)
+			prevUntil := dataEndTime.Add(-time.Hour)
+			err = p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
+			if err == nil && prevCount > 0 {
 				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
 			}
+			utils.LogInfo("POSTGRESQL_CHART", "🔍 %s Previous period query: %s to %s = %d records, change=%.1f%%", 
+				period, prevSince.Format("2006-01-02 15:04:05"), prevUntil.Format("2006-01-02 15:04:05"), prevCount, percentageChange)
 		} else {
 			// For daily and longer periods, use standard comparison
-			if prevCount > 0 {
+			prevSince := dataEndTime.Add(-2 * duration)
+			prevUntil := dataEndTime.Add(-duration)
+			err = p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
+			if err == nil && prevCount > 0 {
 				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
 			}
+			utils.LogInfo("POSTGRESQL_CHART", "🔍 %s Previous period query: %s to %s = %d records, change=%.1f%%", 
+				period, prevSince.Format("2006-01-02 15:04:05"), prevUntil.Format("2006-01-02 15:04:05"), prevCount, percentageChange)
 		}
 		
 		// Default to 0% when no previous data (instead of 100%)
@@ -170,13 +189,18 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		rates.TotalTracked = senders + receivers
 	}
 	
-	utils.LogDebug("POSTGRESQL_CHART", "Transfer rates retrieved from materialized views (FAST)")
+	utils.LogDebug("POSTGRESQL_CHART", "Transfer rates calculated using data timeline (ACCURATE)")
 	return rates, nil
 }
 
 // GetActiveWalletRatesOptimized gets wallet statistics from materialized view (FAST)
 // Replaces: 18+ expensive COUNT DISTINCT queries with 1 fast lookup
 func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTransferRates) map[string]interface{} {
+	// Get actual data timeline for consistency
+	var maxTimestamp int64
+	p.db.QueryRow("SELECT MAX(timestamp) FROM transfers").Scan(&maxTimestamp)
+	dataEndTime := time.Unix(maxTimestamp, 0)
+	
 	result := map[string]interface{}{
 		"dataAvailable": true,
 		"dataAvailability": DataAvailability{
@@ -187,8 +211,8 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 			Has14Days: true,
 			Has30Days: true,
 		},
-		"serverUptime":         time.Since(time.Now().Add(-time.Hour)).Seconds(),
-		"serverUptimeSeconds":  time.Since(time.Now().Add(-time.Hour)).Seconds(),
+		"serverUptime":         time.Since(dataEndTime.Add(-time.Hour)).Seconds(),
+		"serverUptimeSeconds":  time.Since(dataEndTime.Add(-time.Hour)).Seconds(),
 		"lastUpdateTime":       rates.LastUpdateTime,
 		"uniqueSendersTotal":   rates.UniqueSendersTotal,
 		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
@@ -225,12 +249,12 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 		"7d": 7 * 24 * time.Hour, "14d": 14 * 24 * time.Hour, "30d": 30 * 24 * time.Hour,
 	}
 	
-	now := time.Now()
+	// Use the dataEndTime from above
 	
 	for rows.Next() {
 		var period string
 		var senders, receivers, total int64
-		if err := rows.Scan(&period, &senders, &receivers, &total); err != nil {
+		if err = rows.Scan(&period, &senders, &receivers, &total); err != nil {
 			continue
 		}
 		
@@ -239,36 +263,19 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 			result["receivers"+periodName] = receivers
 			result["total"+periodName] = total
 			
-			// Calculate percentage changes using time-based comparison
+			// Calculate percentage changes using actual data timeline
 			if duration, exists := durations[period]; exists {
-				prevSince := now.Add(-2 * duration)
-				prevUntil := now.Add(-duration)
-				
 				var prevSenders, prevReceivers int64
-				
-				// Get previous period counts
-				p.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-					prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenders)
-				p.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-					prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceivers)
-				
-				prevTotal := prevSenders + prevReceivers
-				if prevSenders > 0 && prevReceivers > 0 {
-					overlapEstimate := int64(float64(min(prevSenders, prevReceivers)) * 0.3)
-					prevTotal -= overlapEstimate
-				}
-				
-				// Calculate percentage changes
 				var senderChange, receiverChange, totalChange float64
 				
-				// Use improved percentage calculation logic
+				// Use improved percentage calculation logic with data timeline
 				if period == "1m" {
 					// For minute data, use 5-minute average comparison
 					var avgPrevSenders, avgPrevReceivers int64
 					p.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-						now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&avgPrevSenders)
+						dataEndTime.Add(-6*time.Minute).Unix(), dataEndTime.Add(-time.Minute).Unix()).Scan(&avgPrevSenders)
 					p.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-						now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&avgPrevReceivers)
+						dataEndTime.Add(-6*time.Minute).Unix(), dataEndTime.Add(-time.Minute).Unix()).Scan(&avgPrevReceivers)
 					
 					if avgPrevSenders > 0 {
 						avgSenders := float64(avgPrevSenders) / 5.0
@@ -291,7 +298,23 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 						}
 					}
 				} else {
-					// For longer periods, only calculate if we have previous data
+					// For longer periods, use data timeline for previous period
+					prevSince := dataEndTime.Add(-2 * duration)
+					prevUntil := dataEndTime.Add(-duration)
+					
+					// Get previous period counts
+					p.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+						prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenders)
+					p.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+						prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceivers)
+					
+					prevTotal := prevSenders + prevReceivers
+					if prevSenders > 0 && prevReceivers > 0 {
+						overlapEstimate := int64(float64(min(prevSenders, prevReceivers)) * 0.3)
+						prevTotal -= overlapEstimate
+					}
+					
+					// Only calculate if we have previous data
 					if prevSenders > 0 {
 						senderChange = ((float64(senders) - float64(prevSenders)) / float64(prevSenders)) * 100
 					}
@@ -303,6 +326,12 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 					if prevTotal > 0 {
 						totalChange = ((float64(total) - float64(prevTotal)) / float64(prevTotal)) * 100
 					}
+					
+					utils.LogInfo("POSTGRESQL_CHART", "📊 Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%) [%s to %s]", 
+						periodName, prevSenders, senders, senderChange, 
+						prevReceivers, receivers, receiverChange,
+						prevTotal, total, totalChange,
+						prevSince.Format("2006-01-02 15:04:05"), prevUntil.Format("2006-01-02 15:04:05"))
 				}
 				
 				// Default to 0% when no previous data
@@ -312,18 +341,10 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 				if prevReceivers == 0 && period != "1m" {
 					receiverChange = 0.0
 				}
-				if prevTotal == 0 && period != "1m" {
-					totalChange = 0.0
-				}
 				
 				result["senders"+periodName+"Change"] = senderChange
 				result["receivers"+periodName+"Change"] = receiverChange
 				result["total"+periodName+"Change"] = totalChange
-				
-				utils.LogDebug("POSTGRESQL_CHART", "Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%)", 
-					periodName, prevSenders, senders, senderChange, 
-					prevReceivers, receivers, receiverChange,
-					prevTotal, total, totalChange)
 			} else {
 				// Fallback to zero if duration not found
 				result["senders"+periodName+"Change"] = 0.0
@@ -337,7 +358,7 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 		}
 	}
 	
-	utils.LogDebug("POSTGRESQL_CHART", "Wallet rates retrieved from materialized views (FAST)")
+	utils.LogDebug("POSTGRESQL_CHART", "Wallet rates calculated using data timeline (ACCURATE)")
 	return result
 }
 
@@ -523,8 +544,8 @@ func (p *PostgreSQLChartService) GetActiveReceiversOptimized() ([]FrontendWallet
 	return wallets, nil
 }
 
-// GetChartDataOptimized gets all chart data using PostgreSQL materialized views (ULTRA FAST)
-// Replaces: 50+ complex queries with 7 simple lookups
+// GetChartDataOptimized gets all chart data using PostgreSQL optimizations (ULTRA FAST + ACCURATE)
+// Uses: Materialized views when available, real-time calculations with proper timeline when needed
 func (p *PostgreSQLChartService) GetChartDataOptimized() (map[string]interface{}, error) {
 	utils.LogDebug("POSTGRESQL_CHART_SERVICE", "🚀 Building ultra-fast chart data from materialized views")
 	
@@ -1122,6 +1143,54 @@ func (p *PostgreSQLChartService) hasNodeHealthDataForPeriod(period time.Duration
 		return false
 	}
 	return count > 0
+}
+
+// LoadLatencyDataFromDB - No-op for PostgreSQL service (always uses fresh data)
+func (p *PostgreSQLChartService) LoadLatencyDataFromDB() error {
+	utils.LogDebug("POSTGRESQL_CHART", "LoadLatencyDataFromDB: PostgreSQL service always uses fresh data")
+	return nil
+}
+
+// RefreshCache - No-op for PostgreSQL service (always fresh, no cache needed)
+func (p *PostgreSQLChartService) RefreshCache() error {
+	utils.LogDebug("POSTGRESQL_CHART", "RefreshCache: PostgreSQL service is always fresh, no cache to refresh")
+	return nil
+}
+
+// SetLatencyData - Store latency data (called by health callback)
+func (p *PostgreSQLChartService) SetLatencyData(data []models.LatencyData) {
+	utils.LogDebug("POSTGRESQL_CHART", "SetLatencyData: Received %d latency records", len(data))
+	// The latency data is automatically stored by the health service
+	// PostgreSQL service reads directly from database, so no need to cache
+}
+
+// SetNodeHealthData - Store node health data (called by health callback)  
+func (p *PostgreSQLChartService) SetNodeHealthData(data []models.NodeHealthData) {
+	utils.LogDebug("POSTGRESQL_CHART", "SetNodeHealthData: Received %d node health records", len(data))
+	// The node health data is automatically stored by the health service
+	// PostgreSQL service reads directly from database, so no need to cache
+}
+
+// GetChartDataForFrontend - Main method for getting chart data (optimized)
+func (p *PostgreSQLChartService) GetChartDataForFrontend() (map[string]interface{}, error) {
+	return p.GetChartDataOptimized()
+}
+
+// GetCacheStats - Returns cache statistics (PostgreSQL service always fresh, no cache)
+func (p *PostgreSQLChartService) GetCacheStats() map[string]interface{} {
+	return map[string]interface{}{
+		"service_type":        "postgresql_optimized",
+		"cache_enabled":       false,
+		"always_fresh":        true,
+		"uses_materialized_views": true,
+		"description":         "PostgreSQL service uses materialized views and real-time queries - no cache needed",
+		"query_speed":         "ultra_fast",
+		"data_freshness":      "real_time",
+		"cache_size":          0,
+		"cache_hit_rate":      "N/A - no cache",
+		"last_refresh":        "always",
+		"refresh_strategy":    "materialized_views_with_real_time_fallback",
+	}
 }
 
  
