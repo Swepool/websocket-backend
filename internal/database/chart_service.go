@@ -269,8 +269,8 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 	maxTime := time.Unix(maxTimestamp, 0)
 	dataSpan := maxTime.Sub(minTime)
 	
-	utils.LogInfo("CHART_SERVICE", "📊 DATA ANALYSIS: %d total records | Span: %v | From: %s | To: %s", 
-		totalRecords, dataSpan, minTime.Format("2006-01-02 15:04:05"), maxTime.Format("2006-01-02 15:04:05"))
+	utils.LogInfo("CHART_SERVICE", "📊 DATA ANALYSIS: %d total records | Span: %v (%0.1f hours) | From: %s | To: %s", 
+		totalRecords, dataSpan, dataSpan.Hours(), minTime.Format("2006-01-02 15:04:05"), maxTime.Format("2006-01-02 15:04:05"))
 	
 	// Use the most recent transfer timestamp as our reference point (not current time!)
 	dataEndTime := maxTime
@@ -336,11 +336,15 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 			}
 		} else if period == "1h" {
 			// Compare current hour vs previous hour
+			prevSince := dataEndTime.Add(-2*time.Hour)
+			prevUntil := dataEndTime.Add(-time.Hour)
 			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				dataEndTime.Add(-2*time.Hour).Unix(), dataEndTime.Add(-time.Hour).Unix()).Scan(&prevCount)
+				prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
 			if err == nil && prevCount > 0 {
 				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
 			}
+			utils.LogInfo("CHART_SERVICE", "🔍 %s Previous period query: %s to %s = %d records", 
+				period, prevSince.Format("2006-01-02 15:04:05"), prevUntil.Format("2006-01-02 15:04:05"), prevCount)
 		} else {
 			// For daily and longer periods, use standard previous period comparison
 			prevSince := dataEndTime.Add(-2 * duration)
@@ -350,6 +354,8 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 			if err == nil && prevCount > 0 {
 				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
 			}
+			utils.LogInfo("CHART_SERVICE", "🔍 %s Previous period query: %s to %s = %d records", 
+				period, prevSince.Format("2006-01-02 15:04:05"), prevUntil.Format("2006-01-02 15:04:05"), prevCount)
 		}
 		
 		// Handle case where no previous period data exists
