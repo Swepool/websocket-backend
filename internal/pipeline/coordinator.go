@@ -60,39 +60,25 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 	// Create optimized chart service based on database type
 	var chartService *database.EnhancedChartService
 	
-	if config.Database.DatabaseType == "postgresql" {
-		// Use PostgreSQL-optimized chart service with materialized views (ULTRA FAST)
-		pgChartService := database.NewPostgreSQLChartService(dbWriter.GetDB())
-		utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart service with materialized views")
-		
-		// Check materialized view status
-		if status, err := pgChartService.GetMaterializedViewStatus(); err == nil {
-			utils.LogInfo("COORDINATOR", "📊 Materialized view status: %+v", status)
-		}
-		
-		// Create a wrapper to make PostgreSQL service compatible with existing interface
-		chartService = database.NewEnhancedChartServiceWithPostgreSQL(dbWriter.GetDB(), pgChartService)
-		
-		// No need for WAL checkpoint in PostgreSQL
-		utils.LogInfo("COORDINATOR", "✅ PostgreSQL optimizations active - no WAL checkpoint needed")
-		
-	} else {
-		// Legacy SQLite3 chart service (slower but backward compatible)
-		chartService = database.NewEnhancedChartService(dbWriter.GetDB())
-		utils.LogWarn("COORDINATOR", "⚠️  Using legacy SQLite3 chart service - consider migrating to PostgreSQL")
-		
-		// Force WAL checkpoint before expensive cache warming queries (SQLite3 only)
-		utils.LogInfo("COORDINATOR", "Performing WAL checkpoint before cache warming...")
-		var busy, log, checkpointed int64
-		if err := dbWriter.GetDB().QueryRow("PRAGMA wal_checkpoint(RESTART)").Scan(&busy, &log, &checkpointed); err == nil {
-			utils.LogInfo("COORDINATOR", "WAL checkpoint completed: %d pages checkpointed, %d pages in log", checkpointed, log)
-			if log > 1000 {
-				utils.LogWarn("COORDINATOR", "Large WAL file detected (%d pages) - consider reducing wal_autocheckpoint", log)
-			}
-		} else {
-			utils.LogWarn("COORDINATOR", "WAL checkpoint failed: %v", err)
-		}
+	// Detect PostgreSQL by testing the actual database connection
+	isPostgreSQL := database.IsPostgreSQL(dbWriter.GetDB())
+	
+	utils.LogInfo("COORDINATOR", "🔍 Runtime database detection: PostgreSQL=%t", isPostgreSQL)
+	utils.LogInfo("COORDINATOR", "📋 Database initialized successfully")
+	
+	// Use PostgreSQL-optimized chart service with materialized views (ULTRA FAST)
+	pgChartService := database.NewPostgreSQLChartService(dbWriter.GetDB())
+	utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart service with materialized views")
+	
+	// Check materialized view status
+	if status, err := pgChartService.GetMaterializedViewStatus(); err == nil {
+		utils.LogInfo("COORDINATOR", "📊 Materialized view status: %+v", status)
 	}
+	
+	// Create a wrapper to make PostgreSQL service compatible with existing interface
+	chartService = database.NewEnhancedChartServiceWithPostgreSQL(dbWriter.GetDB(), pgChartService)
+	
+	utils.LogInfo("COORDINATOR", "✅ PostgreSQL optimizations active")
 	
 	// Load existing latency data from database on startup
 	if err := chartService.LoadLatencyDataFromDB(); err != nil {
@@ -113,15 +99,8 @@ func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordi
 		UpdateAllChartSummaries() error
 	}
 	
-	if config.Database.DatabaseType == "postgresql" {
-		// Use PostgreSQL-optimized chart updater
-		chartUpdater = database.NewPostgreSQLChartUpdater(dbWriter.GetDB())
-		utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart updater")
-	} else {
-		// Use legacy SQLite3 chart updater
-		chartUpdater = database.NewChartUpdater(dbWriter.GetDB())
-		utils.LogWarn("COORDINATOR", "⚠️  Using legacy SQLite3 chart updater")
-	}
+	chartUpdater = database.NewPostgreSQLChartUpdater(dbWriter.GetDB())
+	utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart updater")
 	
 	// Create broadcaster
 	b := broadcaster.CreateBroadcaster(config.Broadcaster, ch)

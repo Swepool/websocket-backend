@@ -4,62 +4,67 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 	"websocket-backend-new/models"
 	"websocket-backend-new/internal/utils"
 )
 
-// EnhancedChartService provides comprehensive chart data using hybrid approach
+// EnhancedChartService provides real-time chart data with caching and persistence
 type EnhancedChartService struct {
-	db          *sql.DB
-	latencyData []models.LatencyData
-	latencyMu   sync.RWMutex
-	
-	// Node health data
-	nodeHealthData []models.NodeHealthData
-	healthMu       sync.RWMutex
-	
-	// Cache for expensive chart data (always served to clients)
-	cachedChartData map[string]interface{}
-	chartCacheMu    sync.RWMutex
-	lastCacheUpdate time.Time
-	
-	// PostgreSQL optimization fields
-	pgService     *PostgreSQLChartService
-	usePostgreSQL bool
+	db                  *sql.DB
+	cache               map[string]interface{}
+	lastCacheUpdate     time.Time
+	cacheDuration       time.Duration
+	latencyData         []models.LatencyData
+	nodeHealthData      []models.NodeHealthData
+	pgService          *PostgreSQLChartService
+	latencyMu           sync.RWMutex
+	healthMu            sync.RWMutex
+	cachedChartData     map[string]interface{}
+	chartCacheMu        sync.RWMutex
 }
 
 // NewEnhancedChartService creates a new enhanced chart service
 func NewEnhancedChartService(db *sql.DB) *EnhancedChartService {
 	return &EnhancedChartService{
-		db:              db,
-		latencyData:     []models.LatencyData{},
-		nodeHealthData:  []models.NodeHealthData{},
-		cachedChartData: nil,
+		db:            db,
+		cache:         make(map[string]interface{}),
+		cacheDuration: 30 * time.Second, // 30 second cache
+		latencyData:   make([]models.LatencyData, 0),
+		nodeHealthData: make([]models.NodeHealthData, 0),
 	}
+}
+
+// NewEnhancedChartServiceWithPostgreSQL creates a wrapper that uses PostgreSQL optimizations
+func NewEnhancedChartServiceWithPostgreSQL(db *sql.DB, pgService *PostgreSQLChartService) *EnhancedChartService {
+	enhanced := NewEnhancedChartService(db)
+	enhanced.pgService = pgService
+	utils.LogInfo("CHART_SERVICE", "PostgreSQL optimizations enabled for chart service")
+	return enhanced
 }
 
 // Frontend-compatible data structures matching old stats collector
 
 type FrontendTransferRates struct {
-	TxPerMinute         float64 `json:"txPerMinute"`
-	TxPerHour           float64 `json:"txPerHour"`
-	TxPerDay            float64 `json:"txPerDay"`
-	TxPer7Days          float64 `json:"txPer7Days"`
-	TxPer14Days         float64 `json:"txPer14Days"`
-	TxPer30Days         float64 `json:"txPer30Days"`
-	TxPerMinuteChange   float64 `json:"txPerMinuteChange"`
-	TxPerHourChange     float64 `json:"txPerHourChange"`
-	TxPerDayChange      float64 `json:"txPerDayChange"`
-	TxPer7DaysChange    float64 `json:"txPer7DaysChange"`
-	TxPer14DaysChange   float64 `json:"txPer14DaysChange"`
-	TxPer30DaysChange   float64 `json:"txPer30DaysChange"`
-	TotalTracked        int64   `json:"totalTracked"`
-	UniqueSendersTotal  int64   `json:"uniqueSendersTotal"`
-	UniqueReceiversTotal int64   `json:"uniqueReceiversTotal"`
-	DataAvailability    map[string]bool `json:"dataAvailability"`
-	ServerUptimeSeconds float64 `json:"serverUptimeSeconds"`
+	Last1Min              int64     `json:"last1Min"`
+	Last5Min              int64     `json:"last5Min"`
+	Last15Min             int64     `json:"last15Min"`
+	Last1Hour             int64     `json:"last1Hour"`
+	Last24Hours           int64     `json:"last24Hours"`
+	TotalTracked          int64     `json:"totalTracked"`
+	Change1Min            int64     `json:"change1Min"`
+	Change5Min            int64     `json:"change5Min"`
+	Change15Min           int64     `json:"change15Min"`
+	Change1Hour           int64     `json:"change1Hour"`
+	Change24Hours         int64     `json:"change24Hours"`
+	EstimatedRate1Min     float64   `json:"estimatedRate1Min"`
+	EstimatedRate5Min     float64   `json:"estimatedRate5Min"`
+	EstimatedRate15Min    float64   `json:"estimatedRate15Min"`
+	EstimatedRate1Hour    float64   `json:"estimatedRate1Hour"`
+	EstimatedRate24Hours  float64   `json:"estimatedRate24Hours"`
+	LastUpdateTime        time.Time `json:"lastUpdateTime"`
 }
 
 type FrontendRouteData struct {
@@ -129,43 +134,43 @@ type FrontendAssetRoute struct {
 	LastActivity string  `json:"lastActivity"`
 }
 
-// GetChartDataForFrontend returns complete chart data in frontend-expected format
-// This method ALWAYS returns cached data to ensure fast client connections
+// GetChartDataForFrontend returns cached chart data
 func (c *EnhancedChartService) GetChartDataForFrontend() (map[string]interface{}, error) {
-	now := time.Now()
-	
-	// ALWAYS serve from cache to ensure fast client connections
-	c.chartCacheMu.RLock()
-	if c.cachedChartData != nil {
-		// Return cached data with updated timestamp
-		cachedData := make(map[string]interface{})
-		for k, v := range c.cachedChartData {
-			cachedData[k] = v
+	// Check if cache needs refresh
+	if time.Since(c.lastCacheUpdate) > c.cacheDuration || len(c.cache) == 0 {
+		if err := c.RefreshCache(); err != nil {
+			return nil, err
 		}
-		cachedData["timestamp"] = now // Update timestamp to current
-		age := now.Sub(c.lastCacheUpdate)
-		c.chartCacheMu.RUnlock()
-		
-		utils.LogDebug("CHART_SERVICE", "✅ Serving cached chart data (age: %v)", age)
-		return cachedData, nil
 	}
-	c.chartCacheMu.RUnlock()
 	
-	// Cache is empty (startup scenario) - build initial cache
-	utils.LogInfo("CHART_SERVICE", "⚠️  Cache empty, building initial cache for startup...")
-	return c.buildChartData(now)
+	return c.cache, nil
 }
 
-// buildChartData builds chart data from database (used for cache warming)
+// RefreshCache updates the chart data cache
+func (c *EnhancedChartService) RefreshCache() error {
+	now := time.Now()
+	
+	chartData, err := c.buildChartData(now)
+	if err != nil {
+		return fmt.Errorf("failed to build chart data: %w", err)
+	}
+	
+	c.cache = chartData
+	c.lastCacheUpdate = now
+	
+	return nil
+}
+
+// buildChartData builds comprehensive chart data
 func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interface{}, error) {
 	// Use PostgreSQL optimizations if available (ULTRA FAST)
-	if c.usePostgreSQL && c.pgService != nil {
+	if c.pgService != nil {
 		utils.LogDebug("CHART_SERVICE", "🚀 Using PostgreSQL-optimized chart data building")
 		return c.pgService.GetChartDataOptimized()
 	}
 	
-	// Fall back to legacy SQLite3 implementation (slower)
-	utils.LogDebug("CHART_SERVICE", "Using legacy SQLite3 chart data building")
+	// Standard PostgreSQL implementation
+	utils.LogDebug("CHART_SERVICE", "Using standard PostgreSQL chart data building")
 	
 	// Get real-time transfer rates
 	transferRates, err := c.getTransferRatesWithChanges(now)
@@ -197,51 +202,44 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 	// Get node health summary
 	nodeHealthSummary, err := c.GetNodeHealthSummary()
 	if err != nil {
-		utils.LogError("CHART_SERVICE", "Failed to get node health summary: %v", err)
-	} else {
-		utils.LogDebug("CHART_SERVICE", "Node health summary: %d total nodes, %d healthy", 
-			nodeHealthSummary.TotalNodes, nodeHealthSummary.HealthyNodes)
+		utils.LogWarn("CHART_SERVICE", "Failed to get node health summary: %v", err)
+		nodeHealthSummary = &models.NodeHealthSummary{} // Use empty data
 	}
 	
-	// Build frontend-compatible response
-	chartData := map[string]interface{}{
-		"currentRates":           transferRates,
-		"activeWalletRates":      c.buildActiveWalletRates(transferRates),
-		"popularRoutes":          popularRoutes,
-		"popularRoutesTimeScale": popularRoutesTimeScale,
-		"activeSenders":          activeSenders,
-		"activeSendersTimeScale": activeSendersTimeScale,
-		"activeReceivers":        activeReceivers,
-		"activeReceiversTimeScale": activeReceiversTimeScale,
-		"chainFlowData": map[string]interface{}{
-			"chains":             chainFlows,
-			"chainFlowTimeScale": chainFlowTimeScale,
-			"totalOutgoing":      totalOutgoing,
-			"totalIncoming":      totalIncoming,
-			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
+	return map[string]interface{}{
+		"timestamp":    now,
+		"currentRates": transferRates,
+		"walletRates":  c.buildActiveWalletRates(transferRates),
+		"charts": map[string]interface{}{
+			"popularRoutes": map[string]interface{}{
+				"current":   popularRoutes,
+				"timeScale": popularRoutesTimeScale,
+			},
+			"activeSenders": map[string]interface{}{
+				"current":   activeSenders,
+				"timeScale": activeSendersTimeScale,
+			},
+			"activeReceivers": map[string]interface{}{
+				"current":   activeReceivers,
+				"timeScale": activeReceiversTimeScale,
+			},
+			"chainFlows": map[string]interface{}{
+				"current":     chainFlows,
+				"timeScale":   chainFlowTimeScale,
+				"totalOutgoing": totalOutgoing,
+				"totalIncoming": totalIncoming,
+			},
+			"assetVolumes": map[string]interface{}{
+				"current":       assetVolumes,
+				"timeScale":     assetVolumeTimeScale,
+				"totalAssets":   totalAssets,
+				"totalVolume":   totalVolume,
+				"totalTransfers": totalTransfers,
+			},
 		},
-		"assetVolumeData": map[string]interface{}{
-			"assets":              assetVolumes,
-			"assetVolumeTimeScale": assetVolumeTimeScale,
-			"totalAssets":         totalAssets,
-			"totalVolume":         totalVolume,
-			"totalTransfers":      totalTransfers,
-			"serverUptimeSeconds": transferRates.ServerUptimeSeconds,
-		},
-		"latencyData":       c.GetLatencyData(),
-		"nodeHealthData":    nodeHealthSummary,
-		"dataAvailability":  transferRates.DataAvailability,
-		"timestamp":         now,
-	}
-	
-	// Update cache
-	c.chartCacheMu.Lock()
-	c.cachedChartData = chartData
-	c.lastCacheUpdate = now
-	c.chartCacheMu.Unlock()
-	
-	utils.LogInfo("CHART_SERVICE", "📊 Chart data built and cached")
-	return chartData, nil
+		"nodeHealth": nodeHealthSummary,
+		"latencyData": c.latencyData,
+	}, nil
 }
 
 // Real-time transfer rates with percentage changes
@@ -599,41 +597,27 @@ func (c *EnhancedChartService) storeLatencyDataInDB(data []models.LatencyData) e
 		return nil
 	}
 	
-	// Prepare insert statement with database-specific syntax
-	var insertSQL string
-	if c.usePostgreSQL {
-		// PostgreSQL syntax
-		insertSQL = `
-			INSERT INTO latency_data (
-				source_chain, dest_chain, source_name, dest_name,
-				packet_ack_p5, packet_ack_median, packet_ack_p95,
-				packet_recv_p5, packet_recv_median, packet_recv_p95,
-				write_ack_p5, write_ack_median, write_ack_p95,
-				fetched_at, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			ON CONFLICT (source_chain, dest_chain, fetched_at) DO UPDATE SET
-				source_name = EXCLUDED.source_name,
-				dest_name = EXCLUDED.dest_name,
-				packet_ack_p5 = EXCLUDED.packet_ack_p5,
-				packet_ack_median = EXCLUDED.packet_ack_median,
-				packet_ack_p95 = EXCLUDED.packet_ack_p95,
-				packet_recv_p5 = EXCLUDED.packet_recv_p5,
-				packet_recv_median = EXCLUDED.packet_recv_median,
-				packet_recv_p95 = EXCLUDED.packet_recv_p95,
-				write_ack_p5 = EXCLUDED.write_ack_p5,
-				write_ack_median = EXCLUDED.write_ack_median,
-				write_ack_p95 = EXCLUDED.write_ack_p95`
-	} else {
-		// SQLite3 syntax
-		insertSQL = `
-			INSERT OR REPLACE INTO latency_data (
-				source_chain, dest_chain, source_name, dest_name,
-				packet_ack_p5, packet_ack_median, packet_ack_p95,
-				packet_recv_p5, packet_recv_median, packet_recv_p95,
-				write_ack_p5, write_ack_median, write_ack_p95,
-				fetched_at, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	}
+	// PostgreSQL insert statement
+	insertSQL := `
+		INSERT INTO latency_data (
+			source_chain, dest_chain, source_name, dest_name,
+			packet_ack_p5, packet_ack_median, packet_ack_p95,
+			packet_recv_p5, packet_recv_median, packet_recv_p95,
+			write_ack_p5, write_ack_median, write_ack_p95,
+			fetched_at, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		ON CONFLICT (source_chain, dest_chain, fetched_at) DO UPDATE SET
+			source_name = EXCLUDED.source_name,
+			dest_name = EXCLUDED.dest_name,
+			packet_ack_p5 = EXCLUDED.packet_ack_p5,
+			packet_ack_median = EXCLUDED.packet_ack_median,
+			packet_ack_p95 = EXCLUDED.packet_ack_p95,
+			packet_recv_p5 = EXCLUDED.packet_recv_p5,
+			packet_recv_median = EXCLUDED.packet_recv_median,
+			packet_recv_p95 = EXCLUDED.packet_recv_p95,
+			write_ack_p5 = EXCLUDED.write_ack_p5,
+			write_ack_median = EXCLUDED.write_ack_median,
+			write_ack_p95 = EXCLUDED.write_ack_p95`
 	
 	stmt, err := c.db.Prepare(insertSQL)
 	if err != nil {
@@ -641,12 +625,7 @@ func (c *EnhancedChartService) storeLatencyDataInDB(data []models.LatencyData) e
 	}
 	defer stmt.Close()
 	
-	var now interface{}
-	if c.usePostgreSQL {
-		now = time.Now() // PostgreSQL expects timestamp
-	} else {
-		now = time.Now().Unix() // SQLite3 expects Unix timestamp
-	}
+	now := time.Now() // PostgreSQL expects timestamp
 	
 	successCount := 0
 	
@@ -745,31 +724,11 @@ func (c *EnhancedChartService) GetLatencyData() []models.LatencyData {
 	return result
 }
 
-// InvalidateCache forces the chart data cache to be regenerated on next access
-func (c *EnhancedChartService) InvalidateCache() {
-	c.chartCacheMu.Lock()
-	defer c.chartCacheMu.Unlock()
-	
-	c.cachedChartData = nil
-	c.lastCacheUpdate = time.Time{} // Zero time
-	utils.LogDebug("CHART_SERVICE", "Chart data cache invalidated")
-}
-
-// RefreshCache proactively warms the cache with fresh data
-func (c *EnhancedChartService) RefreshCache() error {
-	utils.LogDebug("CHART_SERVICE", "🔥 Proactively warming chart data cache...")
-	_, err := c.buildChartData(time.Now())
-	return err
-}
-
 // GetCacheStats returns cache performance statistics
 func (c *EnhancedChartService) GetCacheStats() map[string]interface{} {
-	c.chartCacheMu.RLock()
-	defer c.chartCacheMu.RUnlock()
-	
 	stats := map[string]interface{}{
 		"cacheStrategy":   "always_serve_cached",
-		"hasCachedData":   c.cachedChartData != nil,
+		"hasCachedData":   len(c.cache) > 0,
 		"lastUpdate":      c.lastCacheUpdate.Format(time.RFC3339),
 		"updateInterval":  "15s", // Background update frequency
 	}
@@ -823,31 +782,18 @@ func (c *EnhancedChartService) storeNodeHealthDataInDB(healthData []models.NodeH
 	// Skip table creation since it was handled during schema initialization
 	// This avoids SQLite3 vs PostgreSQL syntax conflicts
 	
-	// Insert health data with database-specific syntax
-	var insertQuery string
-	if c.usePostgreSQL {
-		// PostgreSQL syntax
-		insertQuery = `
-			INSERT INTO node_health 
-			(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
-			 latest_block_height, error_message, uptime, checked_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (rpc_url, checked_at) DO UPDATE SET
-				status = EXCLUDED.status,
-				response_time_ms = EXCLUDED.response_time_ms,
-				latest_block_height = EXCLUDED.latest_block_height,
-				error_message = EXCLUDED.error_message,
-				uptime = EXCLUDED.uptime
-		`
-	} else {
-		// SQLite3 syntax
-		insertQuery = `
-			INSERT OR REPLACE INTO node_health 
-			(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
-			 latest_block_height, error_message, uptime, checked_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`
-	}
+	// PostgreSQL insert statement
+	insertQuery := `
+		INSERT INTO node_health 
+		(chain_id, chain_name, rpc_url, rpc_type, status, response_time_ms, 
+		 latest_block_height, error_message, uptime, checked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (rpc_url, checked_at) DO UPDATE SET
+			status = EXCLUDED.status,
+			response_time_ms = EXCLUDED.response_time_ms,
+			latest_block_height = EXCLUDED.latest_block_height,
+			error_message = EXCLUDED.error_message,
+			uptime = EXCLUDED.uptime`
 	
 	stmt, err := c.db.Prepare(insertQuery)
 	if err != nil {
@@ -856,12 +802,7 @@ func (c *EnhancedChartService) storeNodeHealthDataInDB(healthData []models.NodeH
 	defer stmt.Close()
 	
 	for _, health := range healthData {
-		var checkTime interface{}
-		if c.usePostgreSQL {
-			checkTime = time.Unix(health.LastCheckTime, 0) // Convert Unix timestamp to time.Time for PostgreSQL
-		} else {
-			checkTime = health.LastCheckTime // Keep as Unix timestamp for SQLite3
-		}
+		checkTime := time.Unix(health.LastCheckTime, 0) // Convert Unix timestamp to time.Time for PostgreSQL
 		
 		_, err := stmt.Exec(
 			health.ChainID,

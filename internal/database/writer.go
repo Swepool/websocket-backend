@@ -10,8 +10,7 @@ import (
 	"websocket-backend-new/internal/utils"
 	"websocket-backend-new/models"
 	
-	_ "github.com/lib/pq"        // PostgreSQL driver
-	_ "github.com/mattn/go-sqlite3" // SQLite3 driver (for backward compatibility during migration)
+	_ "github.com/lib/pq" // PostgreSQL driver
 )
 
 // Config holds database configuration
@@ -24,12 +23,8 @@ type Config struct {
 	Database string `json:"database"`
 	SSLMode  string `json:"sslMode"`
 	
-	// Legacy SQLite3 configuration (for migration)
-	DatabasePath string `json:"databasePath"`
-	
 	// Common configuration
 	BatchSize    int    `json:"batchSize"`
-	DatabaseType string `json:"databaseType"` // "postgresql" or "sqlite3"
 }
 
 // DefaultConfig returns default database configuration (PostgreSQL)
@@ -67,26 +62,14 @@ func DefaultConfig() Config {
 		sslMode = "disable"
 	}
 	
-	dbType := os.Getenv("DB_TYPE")
-	if dbType == "" {
-		dbType = "postgresql" // Default to PostgreSQL for new installations
-	}
-	
 	return Config{
-		// PostgreSQL configuration (from environment)
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Database: database,
-		SSLMode:  sslMode,
-		
-		// Legacy SQLite3 fallback
-		DatabasePath: "./websocket_backend.db",
-		
-		// Common
-		BatchSize:    1000, // Larger batch size for PostgreSQL
-		DatabaseType: dbType,
+		Host:      host,
+		Port:      port,
+		User:      user,
+		Password:  password,
+		Database:  database,
+		SSLMode:   sslMode,
+		BatchSize: 1000, // Optimized batch size for PostgreSQL
 	}
 }
 
@@ -98,27 +81,16 @@ type Writer struct {
 	insertStmt *sql.Stmt
 }
 
-// NewWriter creates a new database writer with PostgreSQL support
+// NewWriter creates a new database writer with PostgreSQL
 func NewWriter(config Config, channels *channels.Channels) (*Writer, error) {
-	var db *sql.DB
-	var err error
-	
-	// Connect based on database type
-	switch config.DatabaseType {
-	case "postgresql":
-		db, err = connectPostgreSQL(config)
-	case "sqlite3":
-		db, err = connectSQLite3(config)
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", config.DatabaseType)
-	}
-	
+	// Connect to PostgreSQL
+	db, err := connectPostgreSQL(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s database: %w", config.DatabaseType, err)
+		return nil, fmt.Errorf("failed to connect to PostgreSQL database: %w", err)
 	}
 	
 	// Configure database connection pool
-	if err := configureDatabase(db, config); err != nil {
+	if err := configurePostgreSQL(db); err != nil {
 		return nil, fmt.Errorf("failed to configure database: %w", err)
 	}
 	
@@ -142,7 +114,7 @@ func NewWriter(config Config, channels *channels.Channels) (*Writer, error) {
 	
 	writer.insertStmt = insertStmt
 	
-	utils.LogInfo("DB_WRITER", "Database writer initialized with %s", config.DatabaseType)
+	utils.LogInfo("DB_WRITER", "Database writer initialized with PostgreSQL")
 	return writer, nil
 }
 
@@ -165,29 +137,6 @@ func connectPostgreSQL(config Config) (*sql.DB, error) {
 	
 	utils.LogInfo("DB_WRITER", "Connected to PostgreSQL at %s:%d/%s", config.Host, config.Port, config.Database)
 	return db, nil
-}
-
-// connectSQLite3 establishes SQLite3 connection (legacy support)
-func connectSQLite3(config Config) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", config.DatabasePath)
-	if err != nil {
-		return nil, err
-	}
-	
-	utils.LogInfo("DB_WRITER", "Connected to SQLite3 at %s", config.DatabasePath)
-	return db, nil
-}
-
-// configureDatabase sets up database-specific optimizations
-func configureDatabase(db *sql.DB, config Config) error {
-	switch config.DatabaseType {
-	case "postgresql":
-		return configurePostgreSQL(db)
-	case "sqlite3":
-		return configureSQLite(db)
-	default:
-		return fmt.Errorf("unsupported database type: %s", config.DatabaseType)
-	}
 }
 
 // configurePostgreSQL optimizes PostgreSQL for analytical workload
@@ -222,52 +171,14 @@ func configurePostgreSQL(db *sql.DB) error {
 	return nil
 }
 
-// configureSQLite configures SQLite for optimal performance (legacy)
-func configureSQLite(db *sql.DB) error {
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",        // WAL mode for better concurrency
-		"PRAGMA synchronous=NORMAL",      // Faster writes, still safe
-		"PRAGMA cache_size=50000",        // 50MB cache (increased for 175M+ records)
-		"PRAGMA temp_store=memory",       // Keep temp tables in memory
-		"PRAGMA mmap_size=1073741824",    // 1GB memory map (increased for large datasets)
-		"PRAGMA page_size=4096",          // Optimize page size for better I/O
-		"PRAGMA auto_vacuum=INCREMENTAL", // Prevent file bloat with large datasets
-		"PRAGMA wal_autocheckpoint=1000", // More frequent checkpoints for better read performance (was 10000)
-	}
-	
-	for _, pragma := range pragmas {
-		if _, err := db.Exec(pragma); err != nil {
-			return fmt.Errorf("failed to execute %s: %w", pragma, err)
-		}
-	}
-	
-	utils.LogInfo("DB_WRITER", "SQLite configured with WAL mode, 1000-page autocheckpoint, 50MB cache")
-	return nil
-}
-
-// prepareInsertStatement creates the appropriate insert statement for the database type
+// prepareInsertStatement creates the PostgreSQL insert statement
 func (w *Writer) prepareInsertStatement() (*sql.Stmt, error) {
-	var query string
-	
-	switch w.config.DatabaseType {
-	case "postgresql":
-		// PostgreSQL uses $1, $2, etc. for parameters
-		query = `
-			INSERT INTO transfers (
-				packet_hash, sort_order, source_chain, dest_chain, source_name, dest_name,
-				sender, receiver, amount, token_symbol, canonical_token_symbol, timestamp, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-			ON CONFLICT (packet_hash) DO NOTHING`
-	case "sqlite3":
-		// SQLite3 uses ? for parameters
-		query = `
-			INSERT OR IGNORE INTO transfers (
-				packet_hash, sort_order, source_chain, dest_chain, source_name, dest_name,
-				sender, receiver, amount, token_symbol, canonical_token_symbol, timestamp, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	default:
-		return nil, fmt.Errorf("unsupported database type: %s", w.config.DatabaseType)
-	}
+	query := `
+		INSERT INTO transfers (
+			packet_hash, sort_order, source_chain, dest_chain, source_name, dest_name,
+			sender, receiver, amount, token_symbol, canonical_token_symbol, timestamp, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT (packet_hash) DO NOTHING`
 	
 	return w.db.Prepare(query)
 }
@@ -340,16 +251,7 @@ func (w *Writer) Close() error {
 
 // initSchema creates the database tables if they don't exist
 func (w *Writer) initSchema() error {
-	var schemaFile string
-	
-	switch w.config.DatabaseType {
-	case "postgresql":
-		schemaFile = "internal/database/postgresql_schema.sql"
-	case "sqlite3":
-		return w.initSQLiteSchema() // Use existing SQLite schema code
-	default:
-		return fmt.Errorf("unsupported database type: %s", w.config.DatabaseType)
-	}
+	schemaFile := "internal/database/postgresql_schema.sql"
 	
 	// For PostgreSQL, we'll execute the schema file
 	// Note: In production, you'd typically run this manually or via migration tool
@@ -359,57 +261,9 @@ func (w *Writer) initSchema() error {
 	return nil
 }
 
-// initSQLiteSchema creates SQLite schema (legacy)
-func (w *Writer) initSQLiteSchema() error {
-	schema := `
--- Main transfers table (already exists)
-CREATE TABLE IF NOT EXISTS transfers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    packet_hash TEXT UNIQUE NOT NULL,
-    sort_order TEXT,
-    source_chain TEXT NOT NULL,
-    dest_chain TEXT NOT NULL,
-    source_name TEXT,
-    dest_name TEXT,
-    sender TEXT NOT NULL,
-    receiver TEXT NOT NULL,
-    amount REAL,
-    token_symbol TEXT,
-    canonical_token_symbol TEXT,
-    timestamp INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-);
-
--- Essential indexes for fast queries
-CREATE INDEX IF NOT EXISTS idx_transfers_timestamp ON transfers(timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_transfers_route ON transfers(source_chain, dest_chain);
-CREATE INDEX IF NOT EXISTS idx_transfers_token ON transfers(token_symbol, timestamp);
-CREATE INDEX IF NOT EXISTS idx_transfers_canonical_token ON transfers(canonical_token_symbol, timestamp);
-CREATE INDEX IF NOT EXISTS idx_transfers_sender ON transfers(sender, timestamp);
-CREATE INDEX IF NOT EXISTS idx_transfers_receiver ON transfers(receiver, timestamp);
-CREATE INDEX IF NOT EXISTS idx_transfers_chain_timestamp ON transfers(source_chain, timestamp);
-CREATE INDEX IF NOT EXISTS idx_transfers_dest_timestamp ON transfers(dest_chain, timestamp);
-`
-
-	_, err := w.db.Exec(schema)
-	if err != nil {
-		return fmt.Errorf("failed to create SQLite schema: %w", err)
-	}
-
-	utils.LogInfo("DB_WRITER", "SQLite database schema created successfully")
-	return nil
-}
-
 // GetLatestSortOrder returns the most recent sort order from the database
 func (w *Writer) GetLatestSortOrder() (string, error) {
-	var query string
-	
-	switch w.config.DatabaseType {
-	case "postgresql":
-		query = `SELECT sort_order FROM transfers WHERE sort_order IS NOT NULL ORDER BY timestamp DESC, id DESC LIMIT 1`
-	case "sqlite3":
-		query = `SELECT sort_order FROM transfers WHERE sort_order IS NOT NULL ORDER BY timestamp DESC, id DESC LIMIT 1`
-	}
+	query := `SELECT sort_order FROM transfers WHERE sort_order IS NOT NULL ORDER BY timestamp DESC, id DESC LIMIT 1`
 	
 	var sortOrder string
 	err := w.db.QueryRow(query).Scan(&sortOrder)
@@ -425,14 +279,7 @@ func (w *Writer) GetLatestSortOrder() (string, error) {
 
 // GetEarliestSortOrder returns the earliest sort order from the database
 func (w *Writer) GetEarliestSortOrder() (string, error) {
-	var query string
-	
-	switch w.config.DatabaseType {
-	case "postgresql":
-		query = `SELECT sort_order FROM transfers WHERE sort_order IS NOT NULL ORDER BY timestamp ASC, id ASC LIMIT 1`
-	case "sqlite3":
-		query = `SELECT sort_order FROM transfers WHERE sort_order IS NOT NULL ORDER BY timestamp ASC, id ASC LIMIT 1`
-	}
+	query := `SELECT sort_order FROM transfers WHERE sort_order IS NOT NULL ORDER BY timestamp ASC, id ASC LIMIT 1`
 	
 	var sortOrder string
 	err := w.db.QueryRow(query).Scan(&sortOrder)
@@ -466,20 +313,8 @@ func (w *Writer) GetDatabaseStats() (map[string]interface{}, error) {
 	// Get transfer count
 	transferCount, _ := w.GetTransferCount()
 	stats["transfer_count"] = transferCount
-	stats["database_type"] = w.config.DatabaseType
+	stats["database_type"] = "postgresql"
 	
-	switch w.config.DatabaseType {
-	case "postgresql":
-		return w.getPostgreSQLStats(stats)
-	case "sqlite3":
-		return w.getSQLiteStats(stats)
-	default:
-		return stats, nil
-	}
-}
-
-// getPostgreSQLStats gets PostgreSQL-specific statistics
-func (w *Writer) getPostgreSQLStats(stats map[string]interface{}) (map[string]interface{}, error) {
 	// Get database size
 	var dbSizeMB float64
 	w.db.QueryRow("SELECT pg_size_pretty(pg_database_size(current_database()))").Scan(&dbSizeMB)
@@ -504,50 +339,18 @@ func (w *Writer) getPostgreSQLStats(stats map[string]interface{}) (map[string]in
 	stats["materialized_views"] = viewStats
 	
 	// Performance estimate
-	if transferCount, ok := stats["transfer_count"].(int64); ok {
-		if transferCount > 1_000_000 {
-			stats["scale_status"] = "large_scale_optimized"
-			stats["performance_tier"] = "excellent"
-		} else {
-			stats["scale_status"] = "medium_scale"
-			stats["performance_tier"] = "excellent"
-		}
+	if transferCount > 1_000_000 {
+		stats["scale_status"] = "large_scale_optimized"
+		stats["performance_tier"] = "excellent"
+	} else {
+		stats["scale_status"] = "medium_scale"
+		stats["performance_tier"] = "excellent"
 	}
 	
 	return stats, nil
 }
 
-// getSQLiteStats gets SQLite-specific statistics (legacy)
-func (w *Writer) getSQLiteStats(stats map[string]interface{}) (map[string]interface{}, error) {
-	// Get database file size
-	var pageCount, pageSize int64
-	w.db.QueryRow("PRAGMA page_count").Scan(&pageCount)
-	w.db.QueryRow("PRAGMA page_size").Scan(&pageSize)
-	dbSizeBytes := pageCount * pageSize
-	stats["database_size_mb"] = float64(dbSizeBytes) / (1024 * 1024)
-	stats["database_size_gb"] = float64(dbSizeBytes) / (1024 * 1024 * 1024)
-	
-	// Get WAL file size
-	var walPages int64
-	w.db.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&walPages)
-	stats["wal_pages"] = walPages
-	
-	// Performance estimate
-	if transferCount, ok := stats["transfer_count"].(int64); ok {
-		if transferCount > 100_000_000 {
-			stats["scale_status"] = "large_scale"
-			stats["maintenance_recommended"] = true
-			stats["performance_tier"] = "poor"
-		} else if transferCount > 10_000_000 {
-			stats["scale_status"] = "medium_scale" 
-			stats["maintenance_recommended"] = false
-			stats["performance_tier"] = "moderate"
-		} else {
-			stats["scale_status"] = "small_scale"
-			stats["maintenance_recommended"] = false
-			stats["performance_tier"] = "good"
-		}
-	}
-	
-	return stats, nil
+// IsPostgreSQL returns true since this is now PostgreSQL-only
+func IsPostgreSQL(db *sql.DB) bool {
+	return true
 } 

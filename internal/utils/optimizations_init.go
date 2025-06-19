@@ -106,7 +106,7 @@ func PrintOptimizationStatus() {
 	BroadcasterLogger.Info("✓ Optimized JSON marshaling")
 	
 	// Database optimization status
-	BroadcasterLogger.Info("✓ SQLite optimized with WAL mode and indexes")
+	BroadcasterLogger.Info("✓ Database optimized with PostgreSQL")
 	BroadcasterLogger.Info("✓ Database-driven chart computation")
 	BroadcasterLogger.Info("✓ Simplified in-memory data structures")
 	
