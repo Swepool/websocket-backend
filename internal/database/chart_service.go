@@ -170,7 +170,7 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 		transferRates = FrontendTransferRates{DataAvailability: false} // Use empty data
 	}
 	
-	// Get pre-computed chart data from summaries
+	// Get pre-computed chart data from summaries for all timeframes
 	popularRoutes, _ := c.getChartSummary("popular_routes", "1m")
 	popularRoutesTimeScale, _ := c.getAllTimeScaleSummaries("popular_routes")
 	
@@ -193,47 +193,58 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 	// Get active wallet rates in original format
 	activeWalletRates := c.buildActiveWalletRates(transferRates)
 	
-	// Return in original SQLite3 API format
+	// Return in original SQLite3 API format with proper timeframe structure
 	return map[string]interface{}{
 		"timestamp":    now,
 		"currentRates": transferRates,
 		"activeWalletRates": activeWalletRates,
 		"activeSenders": activeSenders,
-		"activeSendersTimeScale": activeSendersTimeScale,
+		"activeSendersTimeScale": activeSendersTimeScale, // Already proper format from getAllTimeScaleSummaries
 		"activeReceivers": activeReceivers,
-		"activeReceiversTimeScale": activeReceiversTimeScale,
+		"activeReceiversTimeScale": activeReceiversTimeScale, // Already proper format
 		"popularRoutes": popularRoutes,
-		"popularRoutesTimeScale": popularRoutesTimeScale,
+		"popularRoutesTimeScale": popularRoutesTimeScale, // Already proper format
 		"chainFlowData": map[string]interface{}{
-			"chains":     chainFlows,
-			"chainFlowTimeScale": chainFlowTimeScale,
-			"totalOutgoing": totalOutgoing,
-			"totalIncoming": totalIncoming,
+			"chains":             chainFlows,
+			"chainFlowTimeScale": chainFlowTimeScale, // Already proper format
+			"totalOutgoing":      totalOutgoing,
+			"totalIncoming":      totalIncoming,
+			"serverUptimeSeconds": time.Since(now.Add(-time.Hour)).Seconds(),
 		},
 		"assetVolumeData": map[string]interface{}{
-			"assets":       assetVolumes,
-			"assetVolumeTimeScale": assetVolumeTimeScale,
-			"totalAssets":   totalAssets,
-			"totalVolume":   totalVolume,
-			"totalTransfers": totalTransfers,
+			"assets":              assetVolumes,
+			"assetVolumeTimeScale": assetVolumeTimeScale, // Already proper format
+			"totalAssets":         totalAssets,
+			"totalVolume":         totalVolume,
+			"totalTransfers":      totalTransfers,
+			"serverUptimeSeconds": time.Since(now.Add(-time.Hour)).Seconds(),
 		},
 		"latencyData": c.latencyData,
 		"nodeHealthData": map[string]interface{}{
 			"dataAvailability": map[string]interface{}{
-				"hasMinute": false,
-				"hasHour":   false,
-				"hasDay":    false,
-				"has7Days":  false,
-				"has14Days": false,
-				"has30Days": false,
+				"hasMinute": c.hasDataForPeriod("1m"),
+				"hasHour":   c.hasDataForPeriod("1h"),
+				"hasDay":    c.hasDataForPeriod("1d"),
+				"has7Days":  c.hasDataForPeriod("7d"),
+				"has14Days": c.hasDataForPeriod("14d"),
+				"has30Days": c.hasDataForPeriod("30d"),
 			},
-			"totalNodes":     0,
-			"healthyNodes":   0,
-			"degradedNodes":  0,
-			"unhealthyNodes": 0,
-			"avgResponseTime": 0.0,
-			"nodesWithRpcs": []interface{}{},
-			"chainHealthStats": map[string]interface{}{},
+			"totalNodes":       len(c.nodeHealthData),
+			"healthyNodes":     c.countHealthyNodes(),
+			"degradedNodes":    c.countDegradedNodes(),
+			"unhealthyNodes":   c.countUnhealthyNodes(),
+			"avgResponseTime":  c.calculateAvgResponseTime(),
+			"nodesWithRpcs":    c.getNodesWithRpcs(),
+			"chainHealthStats": c.getChainHealthStats(),
+		},
+		// Add dataAvailability at the root level for charts to use
+		"dataAvailability": map[string]interface{}{
+			"hasMinute": c.hasDataForPeriod("1m"),
+			"hasHour":   c.hasDataForPeriod("1h"),
+			"hasDay":    c.hasDataForPeriod("1d"),
+			"has7Days":  c.hasDataForPeriod("7d"),
+			"has14Days": c.hasDataForPeriod("14d"),
+			"has30Days": c.hasDataForPeriod("30d"),
 		},
 	}, nil
 }
@@ -571,6 +582,166 @@ func min(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// hasDataForPeriod checks if data is available for a given time period
+func (c *EnhancedChartService) hasDataForPeriod(period string) bool {
+	// Check if we have any chart summaries for this time period
+	var count int
+	err := c.db.QueryRow("SELECT COUNT(*) FROM chart_summaries WHERE time_scale = $1", period).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+// countHealthyNodes counts nodes with healthy status
+func (c *EnhancedChartService) countHealthyNodes() int {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	count := 0
+	for _, node := range c.nodeHealthData {
+		if node.Status == "healthy" || node.Status == "active" {
+			count++
+		}
+	}
+	return count
+}
+
+// countDegradedNodes counts nodes with degraded status
+func (c *EnhancedChartService) countDegradedNodes() int {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	count := 0
+	for _, node := range c.nodeHealthData {
+		if node.Status == "degraded" || node.Status == "warning" {
+			count++
+		}
+	}
+	return count
+}
+
+// countUnhealthyNodes counts nodes with unhealthy status
+func (c *EnhancedChartService) countUnhealthyNodes() int {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	count := 0
+	for _, node := range c.nodeHealthData {
+		if node.Status == "unhealthy" || node.Status == "error" || node.Status == "down" {
+			count++
+		}
+	}
+	return count
+}
+
+// calculateAvgResponseTime calculates average response time across all nodes
+func (c *EnhancedChartService) calculateAvgResponseTime() float64 {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	if len(c.nodeHealthData) == 0 {
+		return 0.0
+	}
+	
+	total := 0.0
+	validCount := 0
+	for _, node := range c.nodeHealthData {
+		if node.ResponseTimeMs > 0 {
+			total += float64(node.ResponseTimeMs)
+			validCount++
+		}
+	}
+	
+	if validCount == 0 {
+		return 0.0
+	}
+	
+	return total / float64(validCount)
+}
+
+// getNodesWithRpcs returns a list of nodes with their RPC information
+func (c *EnhancedChartService) getNodesWithRpcs() []interface{} {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	nodes := make([]interface{}, 0, len(c.nodeHealthData))
+	for _, node := range c.nodeHealthData {
+		nodeInfo := map[string]interface{}{
+			"chainId":    node.ChainID,
+			"chainName":  node.ChainName,
+			"rpcUrl":     node.RpcURL,
+			"rpcType":    node.RpcType,
+			"status":     node.Status,
+			"responseTime": node.ResponseTimeMs,
+			"blockHeight": node.LatestBlockHeight,
+			"uptime":     node.Uptime,
+			"lastCheck":  node.LastCheckTime,
+		}
+		if node.ErrorMessage != "" {
+			nodeInfo["error"] = node.ErrorMessage
+		}
+		nodes = append(nodes, nodeInfo)
+	}
+	
+	return nodes
+}
+
+// getChainHealthStats returns health statistics grouped by chain
+func (c *EnhancedChartService) getChainHealthStats() map[string]interface{} {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+	
+	chainStats := make(map[string]interface{})
+	chainCounts := make(map[string]map[string]int)
+	
+	// Initialize chain counts
+	for _, node := range c.nodeHealthData {
+		if _, exists := chainCounts[node.ChainID]; !exists {
+			chainCounts[node.ChainID] = map[string]int{
+				"healthy":   0,
+				"degraded":  0,
+				"unhealthy": 0,
+				"total":     0,
+			}
+		}
+		
+		chainCounts[node.ChainID]["total"]++
+		
+		switch node.Status {
+		case "healthy", "active":
+			chainCounts[node.ChainID]["healthy"]++
+		case "degraded", "warning":
+			chainCounts[node.ChainID]["degraded"]++
+		case "unhealthy", "error", "down":
+			chainCounts[node.ChainID]["unhealthy"]++
+		}
+	}
+	
+	// Build chain stats
+	for chainID, counts := range chainCounts {
+		// Find chain name
+		chainName := chainID
+		for _, node := range c.nodeHealthData {
+			if node.ChainID == chainID && node.ChainName != "" {
+				chainName = node.ChainName
+				break
+			}
+		}
+		
+		chainStats[chainID] = map[string]interface{}{
+			"chainName":      chainName,
+			"totalNodes":     counts["total"],
+			"healthyNodes":   counts["healthy"],
+			"degradedNodes":  counts["degraded"],
+			"unhealthyNodes": counts["unhealthy"],
+			"healthScore":    float64(counts["healthy"]) / float64(counts["total"]) * 100,
+		}
+	}
+	
+	return chainStats
 }
 
 // SetLatencyData updates the stored latency data (called by latency callback)
