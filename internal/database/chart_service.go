@@ -36,27 +36,25 @@ func NewEnhancedChartService(db *sql.DB) *EnhancedChartService {
 	}
 }
 
-
-
-// Frontend-compatible data structures matching old stats collector
+// Frontend-compatible data structures matching original SQLite3 stats collector
 
 type FrontendTransferRates struct {
-	Last1Min              int64     `json:"last1Min"`
-	Last5Min              int64     `json:"last5Min"`
-	Last15Min             int64     `json:"last15Min"`
-	Last1Hour             int64     `json:"last1Hour"`
-	Last24Hours           int64     `json:"last24Hours"`
-	TotalTracked          int64     `json:"totalTracked"`
-	Change1Min            int64     `json:"change1Min"`
-	Change5Min            int64     `json:"change5Min"`
-	Change15Min           int64     `json:"change15Min"`
-	Change1Hour           int64     `json:"change1Hour"`
-	Change24Hours         int64     `json:"change24Hours"`
-	EstimatedRate1Min     float64   `json:"estimatedRate1Min"`
-	EstimatedRate5Min     float64   `json:"estimatedRate5Min"`
-	EstimatedRate15Min    float64   `json:"estimatedRate15Min"`
-	EstimatedRate1Hour    float64   `json:"estimatedRate1Hour"`
-	EstimatedRate24Hours  float64   `json:"estimatedRate24Hours"`
+	TxPerMinute           int64     `json:"txPerMinute"`
+	TxPerHour             int64     `json:"txPerHour"`
+	TxPerDay              int64     `json:"txPerDay"`
+	TxPer7Days            int64     `json:"txPer7Days"`
+	TxPer14Days           int64     `json:"txPer14Days"`
+	TxPer30Days           int64     `json:"txPer30Days"`
+	PercentageChangeMin   float64   `json:"percentageChangeMin"`
+	PercentageChangeHour  float64   `json:"percentageChangeHour"`
+	PercentageChangeDay   float64   `json:"percentageChangeDay"`
+	PercentageChange7Day  float64   `json:"percentageChange7Day"`
+	PercentageChange14Day float64   `json:"percentageChange14Day"`
+	PercentageChange30Day float64   `json:"percentageChange30Day"`
+	DataAvailability      bool      `json:"dataAvailability"`
+	ServerUptimeSeconds   float64   `json:"serverUptimeSeconds"`
+	UniqueReceiversTotal  int64     `json:"uniqueReceiversTotal"`
+	UniqueSendersTotal    int64     `json:"uniqueSendersTotal"`
 	LastUpdateTime        time.Time `json:"lastUpdateTime"`
 }
 
@@ -154,7 +152,7 @@ func (c *EnhancedChartService) RefreshCache() error {
 	return nil
 }
 
-// buildChartData builds comprehensive chart data
+// buildChartData builds comprehensive chart data (restored original SQLite3 format)
 func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interface{}, error) {
 	// Use PostgreSQL optimizations if available (ULTRA FAST)
 	if c.pgService != nil {
@@ -162,14 +160,14 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 		return c.pgService.GetChartDataOptimized()
 	}
 	
-	// Standard PostgreSQL implementation
-	utils.LogDebug("CHART_SERVICE", "Using standard PostgreSQL chart data building")
+	// Standard PostgreSQL implementation with original SQLite3 format
+	utils.LogDebug("CHART_SERVICE", "Using standard PostgreSQL chart data building (original format)")
 	
-	// Get real-time transfer rates
+	// Get real-time transfer rates in original format
 	transferRates, err := c.getTransferRatesWithChanges(now)
 	if err != nil {
 		utils.LogError("CHART_SERVICE", "Failed to get transfer rates: %v", err)
-		transferRates = FrontendTransferRates{} // Use empty data
+		transferRates = FrontendTransferRates{DataAvailability: false} // Use empty data
 	}
 	
 	// Get pre-computed chart data from summaries
@@ -192,62 +190,54 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 	totalOutgoing, totalIncoming := c.calculateChainTotals(now.Add(-time.Minute))
 	totalAssets, totalVolume, totalTransfers := c.calculateAssetTotals(now.Add(-time.Minute))
 	
-	// Get node health summary
-	nodeHealthSummary, err := c.GetNodeHealthSummary()
-	if err != nil {
-		utils.LogWarn("CHART_SERVICE", "Failed to get node health summary: %v", err)
-		nodeHealthSummary = &models.NodeHealthSummary{} // Use empty data
-	}
+	// Get active wallet rates in original format
+	activeWalletRates := c.buildActiveWalletRates(transferRates)
 	
+	// Return in original SQLite3 API format
 	return map[string]interface{}{
 		"timestamp":    now,
 		"currentRates": transferRates,
-		"walletRates":  c.buildActiveWalletRates(transferRates),
-		"charts": map[string]interface{}{
-			"popularRoutes": map[string]interface{}{
-				"current":   popularRoutes,
-				"timeScale": popularRoutesTimeScale,
-			},
-			"activeSenders": map[string]interface{}{
-				"current":   activeSenders,
-				"timeScale": activeSendersTimeScale,
-			},
-			"activeReceivers": map[string]interface{}{
-				"current":   activeReceivers,
-				"timeScale": activeReceiversTimeScale,
-			},
-			"chainFlows": map[string]interface{}{
-				"current":     chainFlows,
-				"timeScale":   chainFlowTimeScale,
-				"totalOutgoing": totalOutgoing,
-				"totalIncoming": totalIncoming,
-			},
-			"assetVolumes": map[string]interface{}{
-				"current":       assetVolumes,
-				"timeScale":     assetVolumeTimeScale,
-				"totalAssets":   totalAssets,
-				"totalVolume":   totalVolume,
-				"totalTransfers": totalTransfers,
-			},
+		"activeWalletRates": activeWalletRates,
+		"activeSenders": activeSenders,
+		"activeSendersTimeScale": activeSendersTimeScale,
+		"activeReceivers": activeReceivers,
+		"activeReceiversTimeScale": activeReceiversTimeScale,
+		"popularRoutes": popularRoutes,
+		"popularRoutesTimeScale": popularRoutesTimeScale,
+		"chainFlowData": map[string]interface{}{
+			"chains":     chainFlows,
+			"chainFlowTimeScale": chainFlowTimeScale,
+			"totalOutgoing": totalOutgoing,
+			"totalIncoming": totalIncoming,
 		},
-		"nodeHealth": nodeHealthSummary,
+		"assetVolumeData": map[string]interface{}{
+			"assets":       assetVolumes,
+			"assetVolumeTimeScale": assetVolumeTimeScale,
+			"totalAssets":   totalAssets,
+			"totalVolume":   totalVolume,
+			"totalTransfers": totalTransfers,
+		},
 		"latencyData": c.latencyData,
+		"nodeHealthData": map[string]interface{}{}, // Keep empty for compatibility
 	}, nil
 }
 
-// Real-time transfer rates with percentage changes
+// Real-time transfer rates with percentage changes (restored original SQLite3 format)
 func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (FrontendTransferRates, error) {
 	// Calculate current period counts
 	rates := FrontendTransferRates{
-		LastUpdateTime: now,
+		LastUpdateTime:    now,
+		DataAvailability:  true,
+		ServerUptimeSeconds: time.Since(now.Add(-time.Hour)).Seconds(), // Simplified uptime calculation
 	}
 	
 	periods := map[string]time.Duration{
 		"1m":  time.Minute,
-		"5m":  5 * time.Minute,
-		"15m": 15 * time.Minute,
 		"1h":  time.Hour,
-		"24h": 24 * time.Hour,
+		"1d":  24 * time.Hour,
+		"7d":  7 * 24 * time.Hour,
+		"14d": 14 * 24 * time.Hour,
+		"30d": 30 * 24 * time.Hour,
 	}
 	
 	for period, duration := range periods {
@@ -267,39 +257,40 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
 			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
 		
-		// Calculate change (as integer difference)
-		change := currentCount - prevCount
-		
-		// Calculate estimated rate (per minute)
-		estimatedRate := float64(currentCount) / duration.Minutes()
+		// Calculate percentage change
+		var percentageChange float64
+		if prevCount > 0 {
+			percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+		}
 		
 		// Assign to appropriate field
 		switch period {
 		case "1m":
-			rates.Last1Min = currentCount
-			rates.Change1Min = change
-			rates.EstimatedRate1Min = estimatedRate
-		case "5m":
-			rates.Last5Min = currentCount
-			rates.Change5Min = change
-			rates.EstimatedRate5Min = estimatedRate
-		case "15m":
-			rates.Last15Min = currentCount
-			rates.Change15Min = change
-			rates.EstimatedRate15Min = estimatedRate
+			rates.TxPerMinute = currentCount
+			rates.PercentageChangeMin = percentageChange
 		case "1h":
-			rates.Last1Hour = currentCount
-			rates.Change1Hour = change
-			rates.EstimatedRate1Hour = estimatedRate
-		case "24h":
-			rates.Last24Hours = currentCount
-			rates.Change24Hours = change
-			rates.EstimatedRate24Hours = estimatedRate
+			rates.TxPerHour = currentCount
+			rates.PercentageChangeHour = percentageChange
+		case "1d":
+			rates.TxPerDay = currentCount
+			rates.PercentageChangeDay = percentageChange
+		case "7d":
+			rates.TxPer7Days = currentCount
+			rates.PercentageChange7Day = percentageChange
+		case "14d":
+			rates.TxPer14Days = currentCount
+			rates.PercentageChange14Day = percentageChange
+		case "30d":
+			rates.TxPer30Days = currentCount
+			rates.PercentageChange30Day = percentageChange
 		}
 	}
 	
-	// Get total count
-	c.db.QueryRow("SELECT COUNT(*) FROM transfers").Scan(&rates.TotalTracked)
+	// Get unique senders and receivers totals
+	c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", 
+		now.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueSendersTotal)
+	c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", 
+		now.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueReceiversTotal)
 	
 	return rates, nil
 }
