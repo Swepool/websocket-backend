@@ -38,24 +38,40 @@ func NewEnhancedChartService(db *sql.DB) *EnhancedChartService {
 
 // Frontend-compatible data structures matching original SQLite3 stats collector
 
+type DataAvailability struct {
+	HasMinute bool `json:"hasMinute"`
+	HasHour   bool `json:"hasHour"`
+	HasDay    bool `json:"hasDay"`
+	Has7Days  bool `json:"has7Days"`
+	Has14Days bool `json:"has14Days"`
+	Has30Days bool `json:"has30Days"`
+}
+
 type FrontendTransferRates struct {
-	TxPerMinute           int64     `json:"txPerMinute"`
-	TxPerHour             int64     `json:"txPerHour"`
-	TxPerDay              int64     `json:"txPerDay"`
-	TxPer7Days            int64     `json:"txPer7Days"`
-	TxPer14Days           int64     `json:"txPer14Days"`
-	TxPer30Days           int64     `json:"txPer30Days"`
-	PercentageChangeMin   float64   `json:"percentageChangeMin"`
-	PercentageChangeHour  float64   `json:"percentageChangeHour"`
-	PercentageChangeDay   float64   `json:"percentageChangeDay"`
-	PercentageChange7Day  float64   `json:"percentageChange7Day"`
-	PercentageChange14Day float64   `json:"percentageChange14Day"`
-	PercentageChange30Day float64   `json:"percentageChange30Day"`
-	DataAvailability      bool      `json:"dataAvailability"`
-	ServerUptimeSeconds   float64   `json:"serverUptimeSeconds"`
-	UniqueReceiversTotal  int64     `json:"uniqueReceiversTotal"`
-	UniqueSendersTotal    int64     `json:"uniqueSendersTotal"`
-	LastUpdateTime        time.Time `json:"lastUpdateTime"`
+	TxPerMinute           int64            `json:"txPerMinute"`
+	TxPerHour             int64            `json:"txPerHour"`
+	TxPerDay              int64            `json:"txPerDay"`
+	TxPer7Days            int64            `json:"txPer7Days"`
+	TxPer14Days           int64            `json:"txPer14Days"`
+	TxPer30Days           int64            `json:"txPer30Days"`
+	TxPerMinuteChange     *float64         `json:"txPerMinuteChange,omitempty"`
+	TxPerHourChange       *float64         `json:"txPerHourChange,omitempty"`
+	TxPerDayChange        *float64         `json:"txPerDayChange,omitempty"`
+	TxPer7DaysChange      *float64         `json:"txPer7DaysChange,omitempty"`
+	TxPer14DaysChange     *float64         `json:"txPer14DaysChange,omitempty"`
+	TxPer30DaysChange     *float64         `json:"txPer30DaysChange,omitempty"`
+	PercentageChangeMin   float64          `json:"percentageChangeMin"`
+	PercentageChangeHour  float64          `json:"percentageChangeHour"`
+	PercentageChangeDay   float64          `json:"percentageChangeDay"`
+	PercentageChange7Day  float64          `json:"percentageChange7Day"`
+	PercentageChange14Day float64          `json:"percentageChange14Day"`
+	PercentageChange30Day float64          `json:"percentageChange30Day"`
+	TotalTracked          int64            `json:"totalTracked"`
+	DataAvailability      DataAvailability `json:"dataAvailability"`
+	ServerUptimeSeconds   float64          `json:"serverUptimeSeconds"`
+	UniqueReceiversTotal  int64            `json:"uniqueReceiversTotal"`
+	UniqueSendersTotal    int64            `json:"uniqueSendersTotal"`
+	LastUpdateTime        time.Time        `json:"lastUpdateTime"`
 }
 
 type FrontendRouteData struct {
@@ -167,7 +183,16 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 	transferRates, err := c.getTransferRatesWithChanges(now)
 	if err != nil {
 		utils.LogError("CHART_SERVICE", "Failed to get transfer rates: %v", err)
-		transferRates = FrontendTransferRates{DataAvailability: false} // Use empty data
+		transferRates = FrontendTransferRates{
+			DataAvailability: DataAvailability{
+				HasMinute: false,
+				HasHour:   false,
+				HasDay:    false,
+				Has7Days:  false,
+				Has14Days: false,
+				Has30Days: false,
+			},
+		} // Use empty data
 	}
 	
 	// Get pre-computed chart data from summaries for all timeframes
@@ -253,8 +278,15 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (FrontendTransferRates, error) {
 	// Calculate current period counts
 	rates := FrontendTransferRates{
-		LastUpdateTime:    now,
-		DataAvailability:  true,
+		LastUpdateTime: now,
+		DataAvailability: DataAvailability{
+			HasMinute: c.hasDataForPeriod("1m"),
+			HasHour:   c.hasDataForPeriod("1h"),
+			HasDay:    c.hasDataForPeriod("1d"),
+			Has7Days:  c.hasDataForPeriod("7d"),
+			Has14Days: c.hasDataForPeriod("14d"),
+			Has30Days: c.hasDataForPeriod("30d"),
+		},
 		ServerUptimeSeconds: time.Since(now.Add(-time.Hour)).Seconds(), // Simplified uptime calculation
 	}
 	
@@ -295,21 +327,27 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		case "1m":
 			rates.TxPerMinute = currentCount
 			rates.PercentageChangeMin = percentageChange
+			rates.TxPerMinuteChange = &percentageChange
 		case "1h":
 			rates.TxPerHour = currentCount
 			rates.PercentageChangeHour = percentageChange
+			rates.TxPerHourChange = &percentageChange
 		case "1d":
 			rates.TxPerDay = currentCount
 			rates.PercentageChangeDay = percentageChange
+			rates.TxPerDayChange = &percentageChange
 		case "7d":
 			rates.TxPer7Days = currentCount
 			rates.PercentageChange7Day = percentageChange
+			rates.TxPer7DaysChange = &percentageChange
 		case "14d":
 			rates.TxPer14Days = currentCount
 			rates.PercentageChange14Day = percentageChange
+			rates.TxPer14DaysChange = &percentageChange
 		case "30d":
 			rates.TxPer30Days = currentCount
 			rates.PercentageChange30Day = percentageChange
+			rates.TxPer30DaysChange = &percentageChange
 		}
 	}
 	
@@ -318,6 +356,9 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		now.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueSendersTotal)
 	c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", 
 		now.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueReceiversTotal)
+	
+	// Set total tracked
+	rates.TotalTracked = rates.UniqueSendersTotal + rates.UniqueReceiversTotal
 	
 	return rates, nil
 }
@@ -410,8 +451,19 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 	
 	result := map[string]interface{}{
 		"dataAvailable":     true,
-		"serverUptime":      time.Since(now.Add(-time.Hour)).Seconds(),
-		"lastUpdateTime":    rates.LastUpdateTime,
+		"dataAvailability": DataAvailability{
+			HasMinute: rates.DataAvailability.HasMinute,
+			HasHour:   rates.DataAvailability.HasHour,
+			HasDay:    rates.DataAvailability.HasDay,
+			Has7Days:  rates.DataAvailability.Has7Days,
+			Has14Days: rates.DataAvailability.Has14Days,
+			Has30Days: rates.DataAvailability.Has30Days,
+		},
+		"serverUptime":         time.Since(now.Add(-time.Hour)).Seconds(),
+		"serverUptimeSeconds":  time.Since(now.Add(-time.Hour)).Seconds(),
+		"lastUpdateTime":       rates.LastUpdateTime,
+		"uniqueSendersTotal":   rates.UniqueSendersTotal,
+		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
 	}
 	
 	// Calculate unique total wallets (union of all senders and receivers) - USE CACHED DATA

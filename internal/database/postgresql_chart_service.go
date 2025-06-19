@@ -22,8 +22,15 @@ func NewPostgreSQLChartService(db *sql.DB) *PostgreSQLChartService {
 // Replaces: Multiple COUNT queries with 1 fast lookup
 func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRates, error) {
 	rates := FrontendTransferRates{
-		LastUpdateTime:      time.Now(),
-		DataAvailability:    true,
+		LastUpdateTime: time.Now(),
+		DataAvailability: DataAvailability{
+			HasMinute: true,
+			HasHour:   true,
+			HasDay:    true,
+			Has7Days:  true,
+			Has14Days: true,
+			Has30Days: true,
+		},
 		ServerUptimeSeconds: time.Since(time.Now().Add(-time.Hour)).Seconds(),
 	}
 	
@@ -82,21 +89,27 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		case "1m":
 			rates.TxPerMinute = currentCount
 			rates.PercentageChangeMin = percentageChange
+			rates.TxPerMinuteChange = &percentageChange
 		case "1h":
 			rates.TxPerHour = currentCount
 			rates.PercentageChangeHour = percentageChange
+			rates.TxPerHourChange = &percentageChange
 		case "1d":
 			rates.TxPerDay = currentCount
 			rates.PercentageChangeDay = percentageChange
+			rates.TxPerDayChange = &percentageChange
 		case "7d":
 			rates.TxPer7Days = currentCount
 			rates.PercentageChange7Day = percentageChange
+			rates.TxPer7DaysChange = &percentageChange
 		case "14d":
 			rates.TxPer14Days = currentCount
 			rates.PercentageChange14Day = percentageChange
+			rates.TxPer14DaysChange = &percentageChange
 		case "30d":
 			rates.TxPer30Days = currentCount
 			rates.PercentageChange30Day = percentageChange
+			rates.TxPer30DaysChange = &percentageChange
 		}
 	}
 	
@@ -112,6 +125,7 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 	if err == nil {
 		rates.UniqueSendersTotal = senders
 		rates.UniqueReceiversTotal = receivers
+		rates.TotalTracked = senders + receivers
 	}
 	
 	utils.LogDebug("POSTGRESQL_CHART", "Transfer rates retrieved from materialized views (FAST)")
@@ -122,9 +136,20 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 // Replaces: 18+ expensive COUNT DISTINCT queries with 1 fast lookup
 func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTransferRates) map[string]interface{} {
 	result := map[string]interface{}{
-		"dataAvailable":    true,
-		"serverUptime":     time.Since(time.Now().Add(-time.Hour)).Seconds(),
-		"lastUpdateTime":   rates.LastUpdateTime,
+		"dataAvailable": true,
+		"dataAvailability": DataAvailability{
+			HasMinute: true,
+			HasHour:   true,
+			HasDay:    true,
+			Has7Days:  true,
+			Has14Days: true,
+			Has30Days: true,
+		},
+		"serverUptime":         time.Since(time.Now().Add(-time.Hour)).Seconds(),
+		"serverUptimeSeconds":  time.Since(time.Now().Add(-time.Hour)).Seconds(),
+		"lastUpdateTime":       rates.LastUpdateTime,
+		"uniqueSendersTotal":   rates.UniqueSendersTotal,
+		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
 	}
 	
 	// Single fast query instead of 18+ expensive UNION/COUNT DISTINCT operations
@@ -371,7 +396,16 @@ func (p *PostgreSQLChartService) GetChartDataOptimized() (map[string]interface{}
 	transferRates, err := p.GetTransferRatesOptimized()
 	if err != nil {
 		utils.LogError("POSTGRESQL_CHART_SERVICE", "Failed to get transfer rates: %v", err)
-		transferRates = FrontendTransferRates{DataAvailability: false}
+		transferRates = FrontendTransferRates{
+			DataAvailability: DataAvailability{
+				HasMinute: false,
+				HasHour:   false,
+				HasDay:    false,
+				Has7Days:  false,
+				Has14Days: false,
+				Has30Days: false,
+			},
+		}
 	}
 	
 	activeWalletRates := p.GetActiveWalletRatesOptimized(transferRates)
