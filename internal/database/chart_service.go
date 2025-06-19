@@ -293,23 +293,44 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 			continue
 		}
 		
-		// Previous period count for percentage change
-		// For proper comparison, we need the count from the equivalent previous period
-		prevSince := now.Add(-2 * duration)  // Start of previous period
-		prevUntil := now.Add(-duration)      // End of previous period (start of current)
+		// Previous period count for percentage change - use longer lookback for stable comparison
 		var prevCount int64
-		err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
-		if err != nil {
-			prevCount = 0
+		var percentageChange float64
+		
+		// For short periods (1m, 1h), use a more stable comparison window
+		// For longer periods, use the standard previous period comparison
+		if period == "1m" {
+			// Compare current minute vs average of last 5 minutes (excluding current)
+			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&prevCount)
+			if err == nil && prevCount > 0 {
+				avgPrevCount := float64(prevCount) / 5.0 // Average over 5 minutes
+				if avgPrevCount > 0 {
+					percentageChange = ((float64(currentCount) - avgPrevCount) / avgPrevCount) * 100
+				}
+			}
+		} else if period == "1h" {
+			// Compare current hour vs previous hour
+			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				now.Add(-2*time.Hour).Unix(), now.Add(-time.Hour).Unix()).Scan(&prevCount)
+			if err == nil && prevCount > 0 {
+				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+			}
+		} else {
+			// For daily and longer periods, use standard previous period comparison
+			prevSince := now.Add(-2 * duration)
+			prevUntil := now.Add(-duration)
+			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
+			if err == nil && prevCount > 0 {
+				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+			}
 		}
 		
-		// Calculate percentage change
-		var percentageChange float64
-		if prevCount > 0 {
-			percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
-		} else if currentCount > 0 {
-			percentageChange = 100.0 // 100% increase from 0
+		// Only show percentage if we have meaningful comparison data
+		// Avoid showing 100% for everything when there's no previous data
+		if prevCount == 0 {
+			percentageChange = 0.0 // Show 0% instead of 100% when no previous data
 		}
 		
 		utils.LogDebug("CHART_SERVICE", "Period %s: current=%d, prev=%d, change=%.1f%%", 
@@ -552,52 +573,86 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			}
 		}
 		
-		// Calculate percentage changes using time-based comparison (more reliable)
-		prevSince := now.Add(-2 * duration)  // Start of previous period
-		prevUntil := now.Add(-duration)      // End of previous period
-		
-		var prevSenderCount, prevReceiverCount int64
-		
-		// Get previous period sender count
-		err = c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-			prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenderCount)
-		if err != nil {
-			prevSenderCount = 0
-		}
-		
-		// Get previous period receiver count  
-		err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-			prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceiverCount)
-		if err != nil {
-			prevReceiverCount = 0
-		}
-		
-		// Calculate previous total (with overlap estimation)
-		prevTotalCount := prevSenderCount + prevReceiverCount
-		if prevSenderCount > 0 && prevReceiverCount > 0 {
-			overlapEstimate := int64(float64(min(prevSenderCount, prevReceiverCount)) * 0.3)
-			prevTotalCount -= overlapEstimate
-		}
-		
-		// Calculate percentage changes
+		// Calculate percentage changes using improved time-based comparison
+		var prevSenderCount, prevReceiverCount, prevTotalCount int64
 		var senderChange, receiverChange, totalChange float64
 		
-		if prevSenderCount > 0 {
-			senderChange = ((float64(senderCount) - float64(prevSenderCount)) / float64(prevSenderCount)) * 100
-		} else if senderCount > 0 {
-			senderChange = 100.0
+		// Use same improved logic as transfer rates
+		if periodName == "LastMin" {
+			// For minute data, compare against 5-minute average (more stable)
+			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&prevSenderCount)
+			if err == nil && prevSenderCount > 0 {
+				avgPrevSenders := float64(prevSenderCount) / 5.0
+				if avgPrevSenders > 0 {
+					senderChange = ((float64(senderCount) - avgPrevSenders) / avgPrevSenders) * 100
+				}
+			}
+			
+			err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&prevReceiverCount)
+			if err == nil && prevReceiverCount > 0 {
+				avgPrevReceivers := float64(prevReceiverCount) / 5.0
+				if avgPrevReceivers > 0 {
+					receiverChange = ((float64(receiverCount) - avgPrevReceivers) / avgPrevReceivers) * 100
+				}
+			}
+			
+			// Calculate total change based on combined average
+			if prevSenderCount > 0 && prevReceiverCount > 0 {
+				avgPrevTotal := (float64(prevSenderCount + prevReceiverCount) / 5.0) * 0.7 // Account for overlap
+				if avgPrevTotal > 0 {
+					totalChange = ((float64(totalCount) - avgPrevTotal) / avgPrevTotal) * 100
+				}
+			}
+		} else {
+			// For longer periods, use standard previous period comparison
+			prevSince := now.Add(-2 * duration)
+			prevUntil := now.Add(-duration)
+			
+			// Get previous period counts
+			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenderCount)
+			if err != nil {
+				prevSenderCount = 0
+			}
+			
+			err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceiverCount)
+			if err != nil {
+				prevReceiverCount = 0
+			}
+			
+			// Calculate previous total (with overlap estimation)
+			prevTotalCount = prevSenderCount + prevReceiverCount
+			if prevSenderCount > 0 && prevReceiverCount > 0 {
+				overlapEstimate := int64(float64(min(prevSenderCount, prevReceiverCount)) * 0.3)
+				prevTotalCount -= overlapEstimate
+			}
+			
+			// Calculate percentage changes only if we have previous data
+			if prevSenderCount > 0 {
+				senderChange = ((float64(senderCount) - float64(prevSenderCount)) / float64(prevSenderCount)) * 100
+			}
+			
+			if prevReceiverCount > 0 {
+				receiverChange = ((float64(receiverCount) - float64(prevReceiverCount)) / float64(prevReceiverCount)) * 100
+			}
+			
+			if prevTotalCount > 0 {
+				totalChange = ((float64(totalCount) - float64(prevTotalCount)) / float64(prevTotalCount)) * 100
+			}
 		}
 		
-		if prevReceiverCount > 0 {
-			receiverChange = ((float64(receiverCount) - float64(prevReceiverCount)) / float64(prevReceiverCount)) * 100
-		} else if receiverCount > 0 {
-			receiverChange = 100.0
+		// Default to 0% change when no previous data (instead of 100%)
+		if prevSenderCount == 0 {
+			senderChange = 0.0
 		}
-		
-		if prevTotalCount > 0 {
-			totalChange = ((float64(totalCount) - float64(prevTotalCount)) / float64(prevTotalCount)) * 100
-		} else if totalCount > 0 {
-			totalChange = 100.0
+		if prevReceiverCount == 0 {
+			receiverChange = 0.0
+		}
+		if prevTotalCount == 0 && (periodName != "LastMin" || (prevSenderCount == 0 && prevReceiverCount == 0)) {
+			totalChange = 0.0
 		}
 		
 		utils.LogDebug("CHART_SERVICE", "Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%)", 

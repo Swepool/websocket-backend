@@ -93,12 +93,34 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 			prevCount = 0
 		}
 		
-		// Calculate percentage change
+		// Calculate percentage change using improved logic
 		var percentageChange float64
-		if prevCount > 0 {
-			percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
-		} else if currentCount > 0 {
-			percentageChange = 100.0
+		if period == "1m" {
+			// For minute data, compare against 5-minute average (more stable)
+			var avgPrevCount int64
+			err := p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+				time.Now().Add(-6*time.Minute).Unix(), time.Now().Add(-time.Minute).Unix()).Scan(&avgPrevCount)
+			if err == nil && avgPrevCount > 0 {
+				avgPrev := float64(avgPrevCount) / 5.0
+				if avgPrev > 0 {
+					percentageChange = ((float64(currentCount) - avgPrev) / avgPrev) * 100
+				}
+			}
+		} else if period == "1h" {
+			// For hourly data, use previous hour comparison
+			if prevCount > 0 {
+				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+			}
+		} else {
+			// For daily and longer periods, use standard comparison
+			if prevCount > 0 {
+				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+			}
+		}
+		
+		// Default to 0% when no previous data (instead of 100%)
+		if prevCount == 0 && period != "1m" {
+			percentageChange = 0.0
 		}
 		
 		utils.LogDebug("POSTGRESQL_CHART", "Period %s: current=%d, prev=%d, change=%.1f%%", 
@@ -239,22 +261,59 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 				// Calculate percentage changes
 				var senderChange, receiverChange, totalChange float64
 				
-				if prevSenders > 0 {
-					senderChange = ((float64(senders) - float64(prevSenders)) / float64(prevSenders)) * 100
-				} else if senders > 0 {
-					senderChange = 100.0
+				// Use improved percentage calculation logic
+				if period == "1m" {
+					// For minute data, use 5-minute average comparison
+					var avgPrevSenders, avgPrevReceivers int64
+					p.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+						now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&avgPrevSenders)
+					p.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+						now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&avgPrevReceivers)
+					
+					if avgPrevSenders > 0 {
+						avgSenders := float64(avgPrevSenders) / 5.0
+						if avgSenders > 0 {
+							senderChange = ((float64(senders) - avgSenders) / avgSenders) * 100
+						}
+					}
+					
+					if avgPrevReceivers > 0 {
+						avgReceivers := float64(avgPrevReceivers) / 5.0
+						if avgReceivers > 0 {
+							receiverChange = ((float64(receivers) - avgReceivers) / avgReceivers) * 100
+						}
+					}
+					
+					if avgPrevSenders > 0 && avgPrevReceivers > 0 {
+						avgTotal := (float64(avgPrevSenders + avgPrevReceivers) / 5.0) * 0.7 // Account for overlap
+						if avgTotal > 0 {
+							totalChange = ((float64(total) - avgTotal) / avgTotal) * 100
+						}
+					}
+				} else {
+					// For longer periods, only calculate if we have previous data
+					if prevSenders > 0 {
+						senderChange = ((float64(senders) - float64(prevSenders)) / float64(prevSenders)) * 100
+					}
+					
+					if prevReceivers > 0 {
+						receiverChange = ((float64(receivers) - float64(prevReceivers)) / float64(prevReceivers)) * 100
+					}
+					
+					if prevTotal > 0 {
+						totalChange = ((float64(total) - float64(prevTotal)) / float64(prevTotal)) * 100
+					}
 				}
 				
-				if prevReceivers > 0 {
-					receiverChange = ((float64(receivers) - float64(prevReceivers)) / float64(prevReceivers)) * 100
-				} else if receivers > 0 {
-					receiverChange = 100.0
+				// Default to 0% when no previous data
+				if prevSenders == 0 && period != "1m" {
+					senderChange = 0.0
 				}
-				
-				if prevTotal > 0 {
-					totalChange = ((float64(total) - float64(prevTotal)) / float64(prevTotal)) * 100
-				} else if total > 0 {
-					totalChange = 100.0
+				if prevReceivers == 0 && period != "1m" {
+					receiverChange = 0.0
+				}
+				if prevTotal == 0 && period != "1m" {
+					totalChange = 0.0
 				}
 				
 				result["senders"+periodName+"Change"] = senderChange
