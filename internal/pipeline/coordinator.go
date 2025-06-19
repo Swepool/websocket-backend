@@ -214,7 +214,7 @@ func (c *Coordinator) logSyncStatus() {
 func (c *Coordinator) startChartUpdater(ctx context.Context) {
 	// Make interval configurable based on data size
 	// For large datasets (100M+ records), use longer intervals
-	updateInterval := 15 * time.Second
+	updateInterval := 60 * time.Second // Increased from 15s for 175M records
 	
 	// TODO: Make this configurable via environment variable
 	// if os.Getenv("CHART_UPDATE_INTERVAL") != "" {

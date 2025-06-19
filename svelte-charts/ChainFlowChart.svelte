@@ -230,7 +230,7 @@ function getChangeValue(chain: ChainData): number | undefined {
 // Check if time frame data is available
 function isTimeFrameAvailable(timeFrameKey: string): boolean {
   const availabilityMap: Record<string, keyof typeof dataAvailability> = {
-    "1m": "hasMinute",
+    		"5m": "hasMinute",
     "1h": "hasHour",
     "1d": "hasDay",
     "7d": "has7Days",

@@ -31,9 +31,10 @@ func (u *PostgreSQLChartUpdater) UpdateAllChartSummaries() error {
 }
 
 // refreshMaterializedViews refreshes all PostgreSQL materialized views
+// Note: Now uses 5-minute periods instead of 1-minute for better performance with 175M records
 func (u *PostgreSQLChartUpdater) refreshMaterializedViews() error {
 	start := time.Now()
-	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "Starting materialized view refresh...")
+	utils.LogDebug("POSTGRESQL_CHART_UPDATER", "Starting materialized view refresh (5m periods)...")
 	
 	_, err := u.db.Exec("SELECT refresh_analytics()")
 	if err != nil {

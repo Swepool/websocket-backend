@@ -49,7 +49,7 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 	rows, err := p.db.Query(`
 		SELECT period, count 
 		FROM transfer_rates 
-		WHERE period IN ('1m', '1h', '1d', '7d', '14d', '30d')
+		WHERE period IN ('5m', '1h', '1d', '7d', '14d', '30d')
 		ORDER BY 
 			CASE period 
 				WHEN '30d' THEN 1 
@@ -57,7 +57,7 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 				WHEN '7d' THEN 3 
 				WHEN '1d' THEN 4 
 				WHEN '1h' THEN 5 
-				WHEN '1m' THEN 6 
+				WHEN '5m' THEN 6 
 			END`)
 	
 	if err != nil {
@@ -77,9 +77,9 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 	}
 	
 	// Calculate current period counts and percentage changes
-	periods := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
+	periods := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
 	durations := map[string]time.Duration{
-		"1m":  time.Minute,
+		"5m":  5 * time.Minute,
 		"1h":  time.Hour,
 		"1d":  24 * time.Hour,
 		"7d":  7 * 24 * time.Hour,
@@ -106,13 +106,13 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		
 		// Calculate percentage change using improved logic
 		var percentageChange float64
-		if period == "1m" {
-			// For minute data, compare against 5-minute average (more stable)
+		if period == "5m" {
+			// For 5-minute data, compare against 25-minute average (more stable)
 			var avgPrevCount int64
 			err := p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				time.Now().Add(-6*time.Minute).Unix(), time.Now().Add(-time.Minute).Unix()).Scan(&avgPrevCount)
+				time.Now().Add(-30*time.Minute).Unix(), time.Now().Add(-5*time.Minute).Unix()).Scan(&avgPrevCount)
 			if err == nil && avgPrevCount > 0 {
-				avgPrev := float64(avgPrevCount) / 5.0
+				avgPrev := float64(avgPrevCount) / 5.0  // 25 minutes / 5-minute periods = 5 periods
 				if avgPrev > 0 {
 					percentageChange = ((float64(currentCount) - avgPrev) / avgPrev) * 100
 				}
@@ -130,17 +130,17 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 		}
 		
 		// Default to 0% when no previous data (instead of 100%)
-		if prevCount == 0 && period != "1m" {
+		if prevCount == 0 && period != "5m" {
 			percentageChange = 0.0
 		}
 		
 		utils.LogDebug("POSTGRESQL_CHART", "Period %s: current=%d, prev=%d, change=%.1f%%", 
 			period, currentCount, prevCount, percentageChange)
 		
-		// Assign to appropriate field (original SQLite3 format)
+		// Assign to appropriate field (updated for 5-minute periods)
 		switch period {
-		case "1m":
-			rates.TxPerMinute = currentCount
+		case "5m":
+			rates.TxPerMinute = currentCount  // Keep field name for frontend compatibility
 			rates.PercentageChangeMin = percentageChange
 			rates.TxPerMinuteChange = &percentageChange
 		case "1h":
@@ -209,7 +209,7 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 	rows, err := p.db.Query(`
 		SELECT period, unique_senders, unique_receivers, unique_total 
 		FROM wallet_stats 
-		WHERE period IN ('1m', '1h', '1d', '7d', '14d', '30d')
+		WHERE period IN ('5m', '1h', '1d', '7d', '14d', '30d')
 		ORDER BY 
 			CASE period 
 				WHEN '30d' THEN 1 
@@ -217,7 +217,7 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 				WHEN '7d' THEN 3 
 				WHEN '1d' THEN 4 
 				WHEN '1h' THEN 5 
-				WHEN '1m' THEN 6 
+				WHEN '5m' THEN 6 
 			END`)
 	
 	if err != nil {
@@ -227,12 +227,12 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 	defer rows.Close()
 	
 	timeScaleMap := map[string]string{
-		"1m": "LastMin", "1h": "LastHour", "1d": "LastDay",
+		"5m": "LastMin", "1h": "LastHour", "1d": "LastDay",  // Keep "LastMin" for frontend compatibility
 		"7d": "Last7d", "14d": "Last14d", "30d": "Last30d",
 	}
 	
 	durations := map[string]time.Duration{
-		"1m": time.Minute, "1h": time.Hour, "1d": 24 * time.Hour,
+		"5m": 5 * time.Minute, "1h": time.Hour, "1d": 24 * time.Hour,
 		"7d": 7 * 24 * time.Hour, "14d": 14 * 24 * time.Hour, "30d": 30 * 24 * time.Hour,
 	}
 	
@@ -273,13 +273,13 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 				var senderChange, receiverChange, totalChange float64
 				
 				// Use improved percentage calculation logic
-				if period == "1m" {
-					// For minute data, use 5-minute average comparison
+				if period == "5m" {
+					// For 5-minute data, use 25-minute average comparison
 					var avgPrevSenders, avgPrevReceivers int64
 					p.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-						now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&avgPrevSenders)
+						now.Add(-30*time.Minute).Unix(), now.Add(-5*time.Minute).Unix()).Scan(&avgPrevSenders)
 					p.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-						now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&avgPrevReceivers)
+						now.Add(-30*time.Minute).Unix(), now.Add(-5*time.Minute).Unix()).Scan(&avgPrevReceivers)
 					
 					if avgPrevSenders > 0 {
 						avgSenders := float64(avgPrevSenders) / 5.0
@@ -317,13 +317,13 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 				}
 				
 				// Default to 0% when no previous data
-				if prevSenders == 0 && period != "1m" {
+				if prevSenders == 0 && period != "5m" {
 					senderChange = 0.0
 				}
-				if prevReceivers == 0 && period != "1m" {
+				if prevReceivers == 0 && period != "5m" {
 					receiverChange = 0.0
 				}
-				if prevTotal == 0 && period != "1m" {
+				if prevTotal == 0 && period != "5m" {
 					totalChange = 0.0
 				}
 				

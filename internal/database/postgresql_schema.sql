@@ -1,6 +1,9 @@
 -- PostgreSQL Migration Schema for WebSocket Backend
 -- Optimized for 5.5M+ records with real-time analytics
 -- FIXED VERSION: Creates tables FIRST, then indexes, then materialized views
+-- 
+-- ⚠️  IMPORTANT: Changed from 1-minute to 5-minute periods for performance
+--     If upgrading existing system, run: SELECT refresh_analytics(); after applying this schema
 
 -- =======================
 -- 1. CREATE TABLES FIRST
@@ -116,11 +119,11 @@ WITH rate_periods AS (
   FROM transfers
   UNION ALL
   SELECT 
-    '1m' as period,
+    '5m' as period,
     COUNT(*) as count,
     NOW() as calculated_at
   FROM transfers 
-  WHERE timestamp > NOW() - INTERVAL '1 minute'
+  WHERE timestamp > NOW() - INTERVAL '5 minute'
   UNION ALL
   SELECT 
     '1h' as period,
@@ -166,12 +169,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_transfer_rates_period ON transfer_rates (p
 CREATE MATERIALIZED VIEW IF NOT EXISTS wallet_stats AS
 WITH wallet_periods AS (
   SELECT 
-    '1m' as period,
+    '5m' as period,
     COUNT(DISTINCT sender) as unique_senders,
     COUNT(DISTINCT receiver) as unique_receivers,
     NOW() as calculated_at
   FROM transfers 
-  WHERE timestamp > NOW() - INTERVAL '1 minute'
+  WHERE timestamp > NOW() - INTERVAL '5 minute'
   UNION ALL
   SELECT 
     '1h' as period,

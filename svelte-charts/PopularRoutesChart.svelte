@@ -124,7 +124,7 @@ function formatPercentageChange(change?: number): string {
 
 function isTimeFrameAvailable(timeFrameKey: string): boolean {
   const availabilityMap: Record<string, keyof DataAvailability> = {
-    "1m": "hasMinute",
+    		"5m": "hasMinute",
     "1h": "hasHour",
     "1d": "hasDay",
     "7d": "has7Days",

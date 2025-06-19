@@ -3,8 +3,9 @@ package database
 import "time"
 
 // DataAvailability tracks what time periods have data available
+// Note: HasMinute now represents 5-minute periods (changed from 1-minute for performance)
 type DataAvailability struct {
-	HasMinute bool `json:"hasMinute"`
+	HasMinute bool `json:"hasMinute"` // Now represents 5-minute periods
 	HasHour   bool `json:"hasHour"`
 	HasDay    bool `json:"hasDay"`
 	Has7Days  bool `json:"has7Days"`
@@ -13,9 +14,10 @@ type DataAvailability struct {
 }
 
 // FrontendTransferRates represents transfer rate data for the frontend
+// Note: Field names kept for frontend compatibility, but TxPerMinute now represents 5-minute periods
 type FrontendTransferRates struct {
-	// Current period counts
-	TxPerMinute  int64 `json:"txPerMinute"`
+	// Current period counts (TxPerMinute now represents 5-minute periods)
+	TxPerMinute  int64 `json:"txPerMinute"` // Now 5-minute periods for performance
 	TxPerHour    int64 `json:"txPerHour"`
 	TxPerDay     int64 `json:"txPerDay"`
 	TxPer7Days   int64 `json:"txPer7Days"`
