@@ -260,6 +260,30 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 
 // Real-time transfer rates with percentage changes (restored original SQLite3 format)
 func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (FrontendTransferRates, error) {
+	// Get the actual data timestamp range (not import time!)
+	var totalRecords int64
+	var minTimestamp, maxTimestamp int64
+	c.db.QueryRow("SELECT COUNT(*), MIN(timestamp), MAX(timestamp) FROM transfers").Scan(&totalRecords, &minTimestamp, &maxTimestamp)
+	
+	minTime := time.Unix(minTimestamp, 0)
+	maxTime := time.Unix(maxTimestamp, 0)
+	dataSpan := maxTime.Sub(minTime)
+	
+	utils.LogInfo("CHART_SERVICE", "📊 DATA ANALYSIS: %d total records | Span: %v | From: %s | To: %s", 
+		totalRecords, dataSpan, minTime.Format("2006-01-02 15:04:05"), maxTime.Format("2006-01-02 15:04:05"))
+	
+	// Use the most recent transfer timestamp as our reference point (not current time!)
+	dataEndTime := maxTime
+	
+	// Check distribution across periods relative to actual data timeline
+	var count1h, count1d, count7d int64
+	c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", dataEndTime.Add(-time.Hour).Unix()).Scan(&count1h)
+	c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", dataEndTime.Add(-24*time.Hour).Unix()).Scan(&count1d)
+	c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", dataEndTime.Add(-7*24*time.Hour).Unix()).Scan(&count7d)
+	
+	utils.LogInfo("CHART_SERVICE", "📈 DISTRIBUTION FROM DATA END (%s): Last 1h=%d, Last 1d=%d, Last 7d=%d", 
+		dataEndTime.Format("2006-01-02 15:04:05"), count1h, count1d, count7d)
+	
 	// Calculate current period counts
 	rates := FrontendTransferRates{
 		LastUpdateTime: now,
@@ -284,7 +308,8 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 	}
 	
 	for period, duration := range periods {
-		since := now.Add(-duration)
+		// Use actual data timeline, not current time!
+		since := dataEndTime.Add(-duration)
 		
 		// Current period count
 		var currentCount int64
@@ -302,7 +327,7 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		if period == "1m" {
 			// Compare current minute vs average of last 5 minutes (excluding current)
 			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&prevCount)
+				dataEndTime.Add(-6*time.Minute).Unix(), dataEndTime.Add(-time.Minute).Unix()).Scan(&prevCount)
 			if err == nil && prevCount > 0 {
 				avgPrevCount := float64(prevCount) / 5.0 // Average over 5 minutes
 				if avgPrevCount > 0 {
@@ -312,14 +337,14 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		} else if period == "1h" {
 			// Compare current hour vs previous hour
 			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				now.Add(-2*time.Hour).Unix(), now.Add(-time.Hour).Unix()).Scan(&prevCount)
+				dataEndTime.Add(-2*time.Hour).Unix(), dataEndTime.Add(-time.Hour).Unix()).Scan(&prevCount)
 			if err == nil && prevCount > 0 {
 				percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
 			}
 		} else {
 			// For daily and longer periods, use standard previous period comparison
-			prevSince := now.Add(-2 * duration)
-			prevUntil := now.Add(-duration)
+			prevSince := dataEndTime.Add(-2 * duration)
+			prevUntil := dataEndTime.Add(-duration)
 			err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
 				prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
 			if err == nil && prevCount > 0 {
@@ -327,14 +352,35 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 			}
 		}
 		
-		// Only show percentage if we have meaningful comparison data
-		// Avoid showing 100% for everything when there's no previous data
-		if prevCount == 0 {
-			percentageChange = 0.0 // Show 0% instead of 100% when no previous data
+		// Handle case where no previous period data exists
+		if prevCount == 0 && currentCount > 0 {
+			// If we have no previous period data, try alternative comparison
+			if period == "1d" || period == "7d" || period == "30d" {
+				// For longer periods with no historical data, compare against shorter period trend
+				var recentHourCount int64
+				c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", 
+					dataEndTime.Add(-time.Hour).Unix()).Scan(&recentHourCount)
+				
+				if recentHourCount > 0 {
+					// Extrapolate hourly rate to period and compare
+					periodHours := duration.Hours()
+					expectedCount := float64(recentHourCount) * periodHours
+					if expectedCount > 0 {
+						percentageChange = ((float64(currentCount) - expectedCount) / expectedCount) * 100
+						utils.LogInfo("CHART_SERVICE", "🔄 Period %s: Using trend-based calculation (recent hourly rate: %d)", period, recentHourCount)
+					}
+				}
+			}
 		}
 		
-		utils.LogDebug("CHART_SERVICE", "Period %s: current=%d, prev=%d, change=%.1f%%", 
-			period, currentCount, prevCount, percentageChange)
+		// Only default to 0% if we truly have no way to calculate
+		if prevCount == 0 && percentageChange == 0 {
+			percentageChange = 0.0 // Show 0% when no comparison is possible
+		}
+		
+		utils.LogInfo("CHART_SERVICE", "🔍 Period %s: current=%d, prev=%d, change=%.1f%% | Current: %s to %s", 
+			period, currentCount, prevCount, percentageChange,
+			since.Format("2006-01-02 15:04:05"), dataEndTime.Format("2006-01-02 15:04:05"))
 		
 		// Assign to appropriate field
 		switch period {
@@ -365,11 +411,11 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		}
 	}
 	
-	// Get unique senders and receivers totals
+	// Get unique senders and receivers totals (use data timeline!)
 	c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", 
-		now.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueSendersTotal)
+		dataEndTime.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueSendersTotal)
 	c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", 
-		now.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueReceiversTotal)
+		dataEndTime.Add(-30*24*time.Hour).Unix()).Scan(&rates.UniqueReceiversTotal)
 	
 	// Set total tracked
 	rates.TotalTracked = rates.UniqueSendersTotal + rates.UniqueReceiversTotal
@@ -451,7 +497,10 @@ func (c *EnhancedChartService) calculateAssetTotals(since time.Time) (int64, flo
 }
 
 func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRates) map[string]interface{} {
-	now := time.Now()
+	// Get the actual data timeline (same as in transfer rates)
+	var maxTimestamp int64
+	c.db.QueryRow("SELECT MAX(timestamp) FROM transfers").Scan(&maxTimestamp)
+	dataEndTime := time.Unix(maxTimestamp, 0)
 	
 	// Query unique senders and receivers for each time period
 	periods := map[string]time.Duration{
@@ -473,8 +522,8 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			Has14Days: rates.DataAvailability.Has14Days,
 			Has30Days: rates.DataAvailability.Has30Days,
 		},
-		"serverUptime":         time.Since(now.Add(-time.Hour)).Seconds(),
-		"serverUptimeSeconds":  time.Since(now.Add(-time.Hour)).Seconds(),
+		"serverUptime":         time.Since(dataEndTime.Add(-time.Hour)).Seconds(),
+		"serverUptimeSeconds":  time.Since(dataEndTime.Add(-time.Hour)).Seconds(),
 		"lastUpdateTime":       rates.LastUpdateTime,
 		"uniqueSendersTotal":   rates.UniqueSendersTotal,
 		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
@@ -490,12 +539,12 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 		ORDER BY updated_at DESC LIMIT 1`).Scan(&uniqueTotalWallets)
 	
 	if err != nil || uniqueTotalWallets == 0 {
-		// Fallback to approximate calculation if no cached data
+		// Fallback to approximate calculation if no cached data (use data timeline!)
 		var senders, receivers int64
 		c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", 
-			now.Add(-30*24*time.Hour).Unix()).Scan(&senders)
+			dataEndTime.Add(-30*24*time.Hour).Unix()).Scan(&senders)
 		c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", 
-			now.Add(-30*24*time.Hour).Unix()).Scan(&receivers)
+			dataEndTime.Add(-30*24*time.Hour).Unix()).Scan(&receivers)
 		
 		uniqueTotalWallets = senders + receivers
 		// Estimate 30% overlap between senders and receivers (reasonable assumption)
@@ -545,10 +594,10 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			totalCount = cachedData.total
 			utils.LogDebug("CHART_SERVICE", "Used cached wallet stats for %s", periodName)
 		} else {
-			// Fallback to real-time queries only if no cached data (slow path)
-			since := now.Add(-duration)
+			// Fallback to real-time queries only if no cached data (slow path, use data timeline!)
+			since := dataEndTime.Add(-duration)
 			
-			utils.LogWarn("CHART_SERVICE", "No cached wallet stats for %s, using slow queries", periodName)
+			utils.LogWarn("CHART_SERVICE", "No cached wallet stats for %s, using slow queries with data timeline", periodName)
 			
 			// Get unique senders count
 			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", 
@@ -577,11 +626,11 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 		var prevSenderCount, prevReceiverCount, prevTotalCount int64
 		var senderChange, receiverChange, totalChange float64
 		
-		// Use same improved logic as transfer rates
+		// Use same improved logic as transfer rates (with data timeline!)
 		if periodName == "LastMin" {
 			// For minute data, compare against 5-minute average (more stable)
 			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&prevSenderCount)
+				dataEndTime.Add(-6*time.Minute).Unix(), dataEndTime.Add(-time.Minute).Unix()).Scan(&prevSenderCount)
 			if err == nil && prevSenderCount > 0 {
 				avgPrevSenders := float64(prevSenderCount) / 5.0
 				if avgPrevSenders > 0 {
@@ -590,7 +639,7 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			}
 			
 			err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
-				now.Add(-6*time.Minute).Unix(), now.Add(-time.Minute).Unix()).Scan(&prevReceiverCount)
+				dataEndTime.Add(-6*time.Minute).Unix(), dataEndTime.Add(-time.Minute).Unix()).Scan(&prevReceiverCount)
 			if err == nil && prevReceiverCount > 0 {
 				avgPrevReceivers := float64(prevReceiverCount) / 5.0
 				if avgPrevReceivers > 0 {
@@ -606,9 +655,9 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 				}
 			}
 		} else {
-			// For longer periods, use standard previous period comparison
-			prevSince := now.Add(-2 * duration)
-			prevUntil := now.Add(-duration)
+			// For longer periods, use standard previous period comparison (with data timeline!)
+			prevSince := dataEndTime.Add(-2 * duration)
+			prevUntil := dataEndTime.Add(-duration)
 			
 			// Get previous period counts
 			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
@@ -655,10 +704,10 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			totalChange = 0.0
 		}
 		
-		utils.LogDebug("CHART_SERVICE", "Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%)", 
+		utils.LogInfo("CHART_SERVICE", "📊 Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%) [Data timeline: %s]", 
 			periodName, prevSenderCount, senderCount, senderChange, 
 			prevReceiverCount, receiverCount, receiverChange,
-			prevTotalCount, totalCount, totalChange)
+			prevTotalCount, totalCount, totalChange, dataEndTime.Format("2006-01-02 15:04:05"))
 		
 		// Add to result with frontend-expected field names
 		result["senders"+periodName] = senderCount
