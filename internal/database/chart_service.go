@@ -37,13 +37,7 @@ func NewEnhancedChartService(db *sql.DB) *EnhancedChartService {
 	}
 }
 
-// NewEnhancedChartServiceWithPostgreSQL creates a wrapper that uses PostgreSQL optimizations
-func NewEnhancedChartServiceWithPostgreSQL(db *sql.DB, pgService *PostgreSQLChartService) *EnhancedChartService {
-	enhanced := NewEnhancedChartService(db)
-	enhanced.pgService = pgService
-	utils.LogInfo("CHART_SERVICE", "PostgreSQL optimizations enabled for chart service")
-	return enhanced
-}
+
 
 // Frontend-compatible data structures matching old stats collector
 
@@ -246,20 +240,15 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (FrontendTransferRates, error) {
 	// Calculate current period counts
 	rates := FrontendTransferRates{
-		DataAvailability: map[string]bool{
-			"hasMinute": true, "hasHour": true, "hasDay": true,
-			"has7Days": true, "has14Days": true, "has30Days": true,
-		},
-		ServerUptimeSeconds: time.Since(now.Add(-time.Hour)).Seconds(), // Simplified
+		LastUpdateTime: now,
 	}
 	
 	periods := map[string]time.Duration{
 		"1m":  time.Minute,
+		"5m":  5 * time.Minute,
+		"15m": 15 * time.Minute,
 		"1h":  time.Hour,
-		"1d":  24 * time.Hour,
-		"7d":  7 * 24 * time.Hour,
-		"14d": 14 * 24 * time.Hour,
-		"30d": 30 * 24 * time.Hour,
+		"24h": 24 * time.Hour,
 	}
 	
 	for period, duration := range periods {
@@ -267,7 +256,7 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		
 		// Current period count
 		var currentCount int64
-		err := c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > ?", since.Unix()).Scan(&currentCount)
+		err := c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", since.Unix()).Scan(&currentCount)
 		if err != nil {
 			continue
 		}
@@ -276,44 +265,42 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		prevSince := since.Add(-duration)
 		prevUntil := since
 		var prevCount int64
-		c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > ? AND timestamp <= ?", 
+		c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
 			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
 		
-		// Calculate percentage change
-		var change float64
-		if prevCount > 0 {
-			change = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
-		}
+		// Calculate change (as integer difference)
+		change := currentCount - prevCount
+		
+		// Calculate estimated rate (per minute)
+		estimatedRate := float64(currentCount) / duration.Minutes()
 		
 		// Assign to appropriate field
 		switch period {
 		case "1m":
-			rates.TxPerMinute = float64(currentCount)
-			rates.TxPerMinuteChange = change
+			rates.Last1Min = currentCount
+			rates.Change1Min = change
+			rates.EstimatedRate1Min = estimatedRate
+		case "5m":
+			rates.Last5Min = currentCount
+			rates.Change5Min = change
+			rates.EstimatedRate5Min = estimatedRate
+		case "15m":
+			rates.Last15Min = currentCount
+			rates.Change15Min = change
+			rates.EstimatedRate15Min = estimatedRate
 		case "1h":
-			rates.TxPerHour = float64(currentCount)
-			rates.TxPerHourChange = change
-		case "1d":
-			rates.TxPerDay = float64(currentCount)
-			rates.TxPerDayChange = change
-		case "7d":
-			rates.TxPer7Days = float64(currentCount)
-			rates.TxPer7DaysChange = change
-		case "14d":
-			rates.TxPer14Days = float64(currentCount)
-			rates.TxPer14DaysChange = change
-		case "30d":
-			rates.TxPer30Days = float64(currentCount)
-			rates.TxPer30DaysChange = change
+			rates.Last1Hour = currentCount
+			rates.Change1Hour = change
+			rates.EstimatedRate1Hour = estimatedRate
+		case "24h":
+			rates.Last24Hours = currentCount
+			rates.Change24Hours = change
+			rates.EstimatedRate24Hours = estimatedRate
 		}
 	}
 	
-	// Get total count and unique counts (approximate)
+	// Get total count
 	c.db.QueryRow("SELECT COUNT(*) FROM transfers").Scan(&rates.TotalTracked)
-	c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > ?", 
-		now.Add(-24*time.Hour).Unix()).Scan(&rates.UniqueSendersTotal)
-	c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > ?", 
-		now.Add(-24*time.Hour).Unix()).Scan(&rates.UniqueReceiversTotal)
 	
 	return rates, nil
 }
@@ -322,7 +309,7 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 func (c *EnhancedChartService) getChartSummary(chartType, timeScale string) (interface{}, error) {
 	var dataJSON string
 	err := c.db.QueryRow(
-		"SELECT data_json FROM chart_summaries WHERE chart_type = ? AND time_scale = ? ORDER BY updated_at DESC LIMIT 1",
+		"SELECT data_json FROM chart_summaries WHERE chart_type = $1 AND time_scale = $2 ORDER BY updated_at DESC LIMIT 1",
 		chartType, timeScale).Scan(&dataJSON)
 	
 	if err != nil {
@@ -343,7 +330,7 @@ func (c *EnhancedChartService) getChartSummary(chartType, timeScale string) (int
 // Get all time scale summaries for a chart type
 func (c *EnhancedChartService) getAllTimeScaleSummaries(chartType string) (map[string]interface{}, error) {
 	rows, err := c.db.Query(
-		"SELECT time_scale, data_json FROM chart_summaries WHERE chart_type = ? ORDER BY updated_at DESC",
+		"SELECT time_scale, data_json FROM chart_summaries WHERE chart_type = $1 ORDER BY updated_at DESC",
 		chartType)
 	if err != nil {
 		return nil, err
@@ -372,7 +359,7 @@ func (c *EnhancedChartService) getAllTimeScaleSummaries(chartType string) (map[s
 func (c *EnhancedChartService) calculateChainTotals(since time.Time) (int64, int64) {
 	var outgoing, incoming int64
 	
-	c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > ?", since.Unix()).Scan(&outgoing)
+	c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1", since.Unix()).Scan(&outgoing)
 	incoming = outgoing // Simplified - each transfer is both outgoing and incoming
 	
 	return outgoing, incoming
@@ -383,9 +370,9 @@ func (c *EnhancedChartService) calculateAssetTotals(since time.Time) (int64, flo
 	var totalVolume float64
 	
 	// Use canonical_token_symbol for proper wrapping tracking, fallback to token_symbol
-	c.db.QueryRow("SELECT COUNT(DISTINCT COALESCE(NULLIF(canonical_token_symbol, ''), token_symbol)) FROM transfers WHERE timestamp > ? AND COALESCE(NULLIF(canonical_token_symbol, ''), token_symbol) IS NOT NULL", 
+	c.db.QueryRow("SELECT COUNT(DISTINCT COALESCE(NULLIF(canonical_token_symbol, ''), token_symbol)) FROM transfers WHERE timestamp > $1 AND COALESCE(NULLIF(canonical_token_symbol, ''), token_symbol) IS NOT NULL", 
 		since.Unix()).Scan(&totalAssets)
-	c.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM transfers WHERE timestamp > ?", 
+	c.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM transfers WHERE timestamp > $1", 
 		since.Unix()).Scan(&totalTransfers, &totalVolume)
 	
 	return totalAssets, totalVolume, totalTransfers
@@ -405,27 +392,32 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 	}
 	
 	result := map[string]interface{}{
-		"dataAvailability":    rates.DataAvailability,
-		"serverUptimeSeconds": rates.ServerUptimeSeconds,
-		"uniqueSendersTotal":  rates.UniqueSendersTotal,
-		"uniqueReceiversTotal": rates.UniqueReceiversTotal,
+		"dataAvailable":     true,
+		"serverUptime":      time.Since(now.Add(-time.Hour)).Seconds(),
+		"lastUpdateTime":    rates.LastUpdateTime,
 	}
 	
 	// Calculate unique total wallets (union of all senders and receivers) - USE CACHED DATA
 	var uniqueTotalWallets int64
 	// Try to get from cached wallet_stats first (fast path)
 	err := c.db.QueryRow(`
-		SELECT JSON_EXTRACT(data_json, '$.uniqueTotal') 
+		SELECT (data_json->'uniqueTotal')::int 
 		FROM chart_summaries 
 		WHERE chart_type = 'wallet_stats' AND time_scale = '30d' 
 		ORDER BY updated_at DESC LIMIT 1`).Scan(&uniqueTotalWallets)
 	
 	if err != nil || uniqueTotalWallets == 0 {
 		// Fallback to approximate calculation if no cached data
-		uniqueTotalWallets = rates.UniqueSendersTotal + rates.UniqueReceiversTotal
+		var senders, receivers int64
+		c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", 
+			now.Add(-30*24*time.Hour).Unix()).Scan(&senders)
+		c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", 
+			now.Add(-30*24*time.Hour).Unix()).Scan(&receivers)
+		
+		uniqueTotalWallets = senders + receivers
 		// Estimate 30% overlap between senders and receivers (reasonable assumption)
-		if rates.UniqueSendersTotal > 0 && rates.UniqueReceiversTotal > 0 {
-			overlapEstimate := int64(float64(min(rates.UniqueSendersTotal, rates.UniqueReceiversTotal)) * 0.3)
+		if senders > 0 && receivers > 0 {
+			overlapEstimate := int64(float64(min(senders, receivers)) * 0.3)
 			uniqueTotalWallets -= overlapEstimate
 		}
 	}
@@ -456,11 +448,11 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 		
 		err := c.db.QueryRow(`
 			SELECT 
-				JSON_EXTRACT(data_json, '$.uniqueSenders'),
-				JSON_EXTRACT(data_json, '$.uniqueReceivers'), 
-				JSON_EXTRACT(data_json, '$.uniqueTotal')
+				(data_json->'uniqueSenders')::int,
+				(data_json->'uniqueReceivers')::int, 
+				(data_json->'uniqueTotal')::int
 			FROM chart_summaries 
-			WHERE chart_type = 'wallet_stats' AND time_scale = ? 
+			WHERE chart_type = 'wallet_stats' AND time_scale = $1 
 			ORDER BY updated_at DESC LIMIT 1`, timeScale).Scan(&cachedData.senders, &cachedData.receivers, &cachedData.total)
 		
 		if err == nil && cachedData.senders > 0 {
@@ -476,14 +468,14 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			utils.LogWarn("CHART_SERVICE", "No cached wallet stats for %s, using slow queries", periodName)
 			
 			// Get unique senders count
-			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > ?", 
+			err := c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1", 
 				since.Unix()).Scan(&senderCount)
 			if err != nil {
 				senderCount = 0
 			}
 			
 			// Get unique receivers count  
-			err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > ?", 
+			err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1", 
 				since.Unix()).Scan(&receiverCount)
 			if err != nil {
 				receiverCount = 0
@@ -506,11 +498,11 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			// Try cached data for previous period
 			err := c.db.QueryRow(`
 				SELECT 
-					JSON_EXTRACT(data_json, '$.uniqueSenders'),
-					JSON_EXTRACT(data_json, '$.uniqueReceivers'), 
-					JSON_EXTRACT(data_json, '$.uniqueTotal')
+					(data_json->'uniqueSenders')::int,
+					(data_json->'uniqueReceivers')::int, 
+					(data_json->'uniqueTotal')::int
 				FROM chart_summaries 
-				WHERE chart_type = 'wallet_stats' AND time_scale = ? 
+				WHERE chart_type = 'wallet_stats' AND time_scale = $1 
 				ORDER BY updated_at DESC LIMIT 1`, prevTimeScale).Scan(&prevSenderCount, &prevReceiverCount, &prevTotalCount)
 			
 			if err != nil {
@@ -567,13 +559,7 @@ func getPreviousTimeScale(current string) string {
 	}
 }
 
-// Helper function for min calculation (moved to package level)
-func min(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
+
 
 // SetLatencyData updates the stored latency data (called by latency callback)
 func (c *EnhancedChartService) SetLatencyData(data []models.LatencyData) {
