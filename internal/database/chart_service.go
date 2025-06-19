@@ -218,7 +218,23 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 			"totalTransfers": totalTransfers,
 		},
 		"latencyData": c.latencyData,
-		"nodeHealthData": map[string]interface{}{}, // Keep empty for compatibility
+		"nodeHealthData": map[string]interface{}{
+			"dataAvailability": map[string]interface{}{
+				"hasMinute": false,
+				"hasHour":   false,
+				"hasDay":    false,
+				"has7Days":  false,
+				"has14Days": false,
+				"has30Days": false,
+			},
+			"totalNodes":     0,
+			"healthyNodes":   0,
+			"degradedNodes":  0,
+			"unhealthyNodes": 0,
+			"avgResponseTime": 0.0,
+			"nodesWithRpcs": []interface{}{},
+			"chainHealthStats": map[string]interface{}{},
+		},
 	}, nil
 }
 

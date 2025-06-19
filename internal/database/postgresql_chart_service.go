@@ -432,7 +432,23 @@ func (p *PostgreSQLChartService) GetChartDataOptimized() (map[string]interface{}
 			"totalTransfers":      totalTransfers,
 		},
 		"latencyData":       []interface{}{}, // Will be handled separately
-		"nodeHealthData":    map[string]interface{}{}, // Will be handled separately
+		"nodeHealthData": map[string]interface{}{
+			"dataAvailability": map[string]interface{}{
+				"hasMinute": false,
+				"hasHour":   false,
+				"hasDay":    false,
+				"has7Days":  false,
+				"has14Days": false,
+				"has30Days": false,
+			},
+			"totalNodes":     0,
+			"healthyNodes":   0,
+			"degradedNodes":  0,
+			"unhealthyNodes": 0,
+			"avgResponseTime": 0.0,
+			"nodesWithRpcs": []interface{}{},
+			"chainHealthStats": map[string]interface{}{},
+		},
 		"timestamp":         now,
 	}
 	
