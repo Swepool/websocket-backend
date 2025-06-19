@@ -67,22 +67,42 @@ func (p *PostgreSQLChartService) GetTransferRatesOptimized() (FrontendTransferRa
 	
 	// Calculate current period counts and percentage changes
 	periods := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
+	durations := map[string]time.Duration{
+		"1m":  time.Minute,
+		"1h":  time.Hour,
+		"1d":  24 * time.Hour,
+		"7d":  7 * 24 * time.Hour,
+		"14d": 14 * 24 * time.Hour,
+		"30d": 30 * 24 * time.Hour,
+	}
 	
-	for i, period := range periods {
+	now := time.Now()
+	
+	for _, period := range periods {
 		currentCount := periodCounts[period]
 		
-		// Calculate previous period for percentage change
-		var prevCount int64 = 0
-		if i > 0 {
-			prevPeriod := periods[i-1]
-			prevCount = periodCounts[prevPeriod]
+		// Calculate previous period for percentage change using time-based comparison
+		duration := durations[period]
+		prevSince := now.Add(-2 * duration)
+		prevUntil := now.Add(-duration)
+		
+		var prevCount int64
+		err := p.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
+		if err != nil {
+			prevCount = 0
 		}
 		
 		// Calculate percentage change
-		var percentageChange float64 = 0
+		var percentageChange float64
 		if prevCount > 0 {
 			percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+		} else if currentCount > 0 {
+			percentageChange = 100.0
 		}
+		
+		utils.LogDebug("POSTGRESQL_CHART", "Period %s: current=%d, prev=%d, change=%.1f%%", 
+			period, currentCount, prevCount, percentageChange)
 		
 		// Assign to appropriate field (original SQLite3 format)
 		switch period {
@@ -178,6 +198,13 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 		"7d": "Last7d", "14d": "Last14d", "30d": "Last30d",
 	}
 	
+	durations := map[string]time.Duration{
+		"1m": time.Minute, "1h": time.Hour, "1d": 24 * time.Hour,
+		"7d": 7 * 24 * time.Hour, "14d": 14 * 24 * time.Hour, "30d": 30 * 24 * time.Hour,
+	}
+	
+	now := time.Now()
+	
 	for rows.Next() {
 		var period string
 		var senders, receivers, total int64
@@ -190,10 +217,60 @@ func (p *PostgreSQLChartService) GetActiveWalletRatesOptimized(rates FrontendTra
 			result["receivers"+periodName] = receivers
 			result["total"+periodName] = total
 			
-			// Add zero percentage changes for now (can be enhanced later)
-			result["senders"+periodName+"Change"] = 0.0
-			result["receivers"+periodName+"Change"] = 0.0
-			result["total"+periodName+"Change"] = 0.0
+			// Calculate percentage changes using time-based comparison
+			if duration, exists := durations[period]; exists {
+				prevSince := now.Add(-2 * duration)
+				prevUntil := now.Add(-duration)
+				
+				var prevSenders, prevReceivers int64
+				
+				// Get previous period counts
+				p.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+					prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenders)
+				p.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+					prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceivers)
+				
+				prevTotal := prevSenders + prevReceivers
+				if prevSenders > 0 && prevReceivers > 0 {
+					overlapEstimate := int64(float64(min(prevSenders, prevReceivers)) * 0.3)
+					prevTotal -= overlapEstimate
+				}
+				
+				// Calculate percentage changes
+				var senderChange, receiverChange, totalChange float64
+				
+				if prevSenders > 0 {
+					senderChange = ((float64(senders) - float64(prevSenders)) / float64(prevSenders)) * 100
+				} else if senders > 0 {
+					senderChange = 100.0
+				}
+				
+				if prevReceivers > 0 {
+					receiverChange = ((float64(receivers) - float64(prevReceivers)) / float64(prevReceivers)) * 100
+				} else if receivers > 0 {
+					receiverChange = 100.0
+				}
+				
+				if prevTotal > 0 {
+					totalChange = ((float64(total) - float64(prevTotal)) / float64(prevTotal)) * 100
+				} else if total > 0 {
+					totalChange = 100.0
+				}
+				
+				result["senders"+periodName+"Change"] = senderChange
+				result["receivers"+periodName+"Change"] = receiverChange
+				result["total"+periodName+"Change"] = totalChange
+				
+				utils.LogDebug("POSTGRESQL_CHART", "Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%)", 
+					periodName, prevSenders, senders, senderChange, 
+					prevReceivers, receivers, receiverChange,
+					prevTotal, total, totalChange)
+			} else {
+				// Fallback to zero if duration not found
+				result["senders"+periodName+"Change"] = 0.0
+				result["receivers"+periodName+"Change"] = 0.0
+				result["total"+periodName+"Change"] = 0.0
+			}
 		}
 		
 		if period == "30d" {
@@ -479,24 +556,8 @@ func (p *PostgreSQLChartService) GetChartDataOptimized() (map[string]interface{}
 			"totalTransfers":      totalTransfers,
 			"serverUptimeSeconds": time.Since(time.Now().Add(-time.Hour)).Seconds(),
 		},
-		"latencyData": []interface{}{}, // TODO: Add latency data from materialized views
-		"nodeHealthData": map[string]interface{}{
-			"dataAvailability": map[string]interface{}{
-				"hasMinute": true, // Materialized views provide 30-day data
-				"hasHour":   true,
-				"hasDay":    true,
-				"has7Days":  true,
-				"has14Days": true,
-				"has30Days": true,
-			},
-			"totalNodes":       0,
-			"healthyNodes":     0,
-			"degradedNodes":    0,
-			"unhealthyNodes":   0,
-			"avgResponseTime":  0.0,
-			"nodesWithRpcs":    []interface{}{},
-			"chainHealthStats": map[string]interface{}{},
-		},
+		"latencyData": p.getLatencyDataFromDB(), // Get actual latency data
+		"nodeHealthData": p.getNodeHealthDataSummary(),
 		// Add dataAvailability at the root level for charts to use
 		"dataAvailability": map[string]interface{}{
 			"hasMinute": p.hasDataInMaterializedViews(),
@@ -755,4 +816,253 @@ func (p *PostgreSQLChartService) calculateAssetTotalsFromViews(assets []Frontend
 		totalTransfers += float64(asset.TransferCount)
 	}
 	return totalAssets, totalVolume, totalTransfers
-} 
+}
+
+// getLatencyDataFromDB retrieves the latest latency data from database
+func (p *PostgreSQLChartService) getLatencyDataFromDB() []interface{} {
+	query := `
+		SELECT DISTINCT 
+			l1.source_chain, l1.dest_chain, l1.source_name, l1.dest_name,
+			l1.packet_ack_p5, l1.packet_ack_median, l1.packet_ack_p95,
+			l1.packet_recv_p5, l1.packet_recv_median, l1.packet_recv_p95,
+			l1.write_ack_p5, l1.write_ack_median, l1.write_ack_p95
+		FROM latency_data l1
+		INNER JOIN (
+			SELECT source_chain, dest_chain, MAX(fetched_at) as max_fetched
+			FROM latency_data 
+			GROUP BY source_chain, dest_chain
+		) l2 ON l1.source_chain = l2.source_chain 
+			AND l1.dest_chain = l2.dest_chain 
+			AND l1.fetched_at = l2.max_fetched
+		ORDER BY l1.source_name, l1.dest_name`
+	
+	rows, err := p.db.Query(query)
+	if err != nil {
+		utils.LogError("POSTGRESQL_CHART", "Failed to query latency data: %v", err)
+		return []interface{}{}
+	}
+	defer rows.Close()
+	
+	var latencyData []interface{}
+	for rows.Next() {
+		var sourceChain, destChain, sourceName, destName string
+		var packetAckP5, packetAckMedian, packetAckP95 float64
+		var packetRecvP5, packetRecvMedian, packetRecvP95 float64
+		var writeAckP5, writeAckMedian, writeAckP95 float64
+		
+		err := rows.Scan(
+			&sourceChain, &destChain, &sourceName, &destName,
+			&packetAckP5, &packetAckMedian, &packetAckP95,
+			&packetRecvP5, &packetRecvMedian, &packetRecvP95,
+			&writeAckP5, &writeAckMedian, &writeAckP95,
+		)
+		
+		if err != nil {
+			utils.LogError("POSTGRESQL_CHART", "Failed to scan latency row: %v", err)
+			continue
+		}
+		
+		latency := map[string]interface{}{
+			"sourceChain":      sourceChain,
+			"destinationChain": destChain,
+			"sourceName":       sourceName,
+			"destinationName":  destName,
+			"packetAck": map[string]interface{}{
+				"p5":     packetAckP5,
+				"median": packetAckMedian,
+				"p95":    packetAckP95,
+			},
+			"packetRecv": map[string]interface{}{
+				"p5":     packetRecvP5,
+				"median": packetRecvMedian,
+				"p95":    packetRecvP95,
+			},
+			"writeAck": map[string]interface{}{
+				"p5":     writeAckP5,
+				"median": writeAckMedian,
+				"p95":    writeAckP95,
+			},
+		}
+		
+		latencyData = append(latencyData, latency)
+	}
+	
+	utils.LogDebug("POSTGRESQL_CHART", "Retrieved %d latency records from database", len(latencyData))
+	return latencyData
+}
+
+// getNodeHealthDataSummary retrieves node health data from database
+func (p *PostgreSQLChartService) getNodeHealthDataSummary() map[string]interface{} {
+	// Get latest health data
+	query := `
+		SELECT 
+			nh1.chain_id, nh1.chain_name, nh1.rpc_url, nh1.rpc_type, 
+			nh1.status, nh1.response_time_ms, nh1.latest_block_height, 
+			nh1.error_message, nh1.uptime, nh1.checked_at
+		FROM node_health nh1
+		INNER JOIN (
+			SELECT rpc_url, MAX(checked_at) as max_checked
+			FROM node_health 
+			WHERE checked_at > NOW() - INTERVAL '1 hour'
+			GROUP BY rpc_url
+		) nh2 ON nh1.rpc_url = nh2.rpc_url 
+			AND nh1.checked_at = nh2.max_checked
+		ORDER BY nh1.chain_name, nh1.rpc_url`
+	
+	rows, err := p.db.Query(query)
+	if err != nil {
+		utils.LogError("POSTGRESQL_CHART", "Failed to query node health data: %v", err)
+		return map[string]interface{}{
+			"totalNodes":       0,
+			"healthyNodes":     0,
+			"degradedNodes":    0,
+			"unhealthyNodes":   0,
+			"avgResponseTime":  0.0,
+			"nodesWithRpcs":    []interface{}{},
+			"chainHealthStats": map[string]interface{}{},
+			"dataAvailability": map[string]interface{}{
+				"hasMinute": false,
+				"hasHour":   false,
+				"hasDay":    false,
+				"has7Days":  false,
+				"has14Days": false,
+				"has30Days": false,
+			},
+		}
+	}
+	defer rows.Close()
+	
+	var nodes []interface{}
+	totalNodes := 0
+	healthyNodes := 0
+	degradedNodes := 0
+	unhealthyNodes := 0
+	totalResponseTime := 0
+	responseTimeCount := 0
+	chainStats := make(map[string]map[string]interface{})
+	
+	for rows.Next() {
+		var chainID, chainName, rpcURL, rpcType, status, errorMessage string
+		var responseTimeMs int
+		var blockHeight *int64
+		var uptime float64
+		var checkedAt time.Time
+		
+		err := rows.Scan(&chainID, &chainName, &rpcURL, &rpcType, &status, 
+			&responseTimeMs, &blockHeight, &errorMessage, &uptime, &checkedAt)
+		if err != nil {
+			utils.LogError("POSTGRESQL_CHART", "Failed to scan node health row: %v", err)
+			continue
+		}
+		
+		totalNodes++
+		
+		// Count by status
+		switch status {
+		case "healthy":
+			healthyNodes++
+			if responseTimeMs > 0 {
+				totalResponseTime += responseTimeMs
+				responseTimeCount++
+			}
+		case "degraded":
+			degradedNodes++
+			if responseTimeMs > 0 {
+				totalResponseTime += responseTimeMs
+				responseTimeCount++
+			}
+		case "unhealthy":
+			unhealthyNodes++
+		}
+		
+		// Build node info
+		nodeInfo := map[string]interface{}{
+			"chainId":      chainID,
+			"chainName":    chainName,
+			"rpcUrl":       rpcURL,
+			"rpcType":      rpcType,
+			"status":       status,
+			"responseTime": responseTimeMs,
+			"blockHeight":  blockHeight,
+			"uptime":       uptime,
+			"lastCheck":    checkedAt.Unix(),
+		}
+		if errorMessage != "" {
+			nodeInfo["error"] = errorMessage
+		}
+		nodes = append(nodes, nodeInfo)
+		
+		// Aggregate chain stats
+		if _, exists := chainStats[chainID]; !exists {
+			chainStats[chainID] = map[string]interface{}{
+				"chainName":      chainName,
+				"totalNodes":     0,
+				"healthyNodes":   0,
+				"degradedNodes":  0,
+				"unhealthyNodes": 0,
+				"healthScore":    0.0,
+			}
+		}
+		
+		stat := chainStats[chainID]
+		stat["totalNodes"] = stat["totalNodes"].(int) + 1
+		
+		switch status {
+		case "healthy":
+			stat["healthyNodes"] = stat["healthyNodes"].(int) + 1
+		case "degraded":
+			stat["degradedNodes"] = stat["degradedNodes"].(int) + 1
+		case "unhealthy":
+			stat["unhealthyNodes"] = stat["unhealthyNodes"].(int) + 1
+		}
+		
+		// Update health score
+		total := stat["totalNodes"].(int)
+		healthy := stat["healthyNodes"].(int)
+		if total > 0 {
+			stat["healthScore"] = float64(healthy) / float64(total) * 100
+		}
+	}
+	
+	// Calculate average response time
+	avgResponseTime := 0.0
+	if responseTimeCount > 0 {
+		avgResponseTime = float64(totalResponseTime) / float64(responseTimeCount)
+	}
+	
+	utils.LogDebug("POSTGRESQL_CHART", "Retrieved node health summary: %d nodes (%d healthy, %d degraded, %d unhealthy)", 
+		totalNodes, healthyNodes, degradedNodes, unhealthyNodes)
+	
+	return map[string]interface{}{
+		"totalNodes":       totalNodes,
+		"healthyNodes":     healthyNodes,
+		"degradedNodes":    degradedNodes,
+		"unhealthyNodes":   unhealthyNodes,
+		"avgResponseTime":  avgResponseTime,
+		"nodesWithRpcs":    nodes,
+		"chainHealthStats": chainStats,
+		"dataAvailability": map[string]interface{}{
+			"hasMinute": totalNodes > 0,
+			"hasHour":   totalNodes > 0,
+			"hasDay":    p.hasNodeHealthDataForPeriod(24 * time.Hour),
+			"has7Days":  p.hasNodeHealthDataForPeriod(7 * 24 * time.Hour),
+			"has14Days": p.hasNodeHealthDataForPeriod(14 * 24 * time.Hour),
+			"has30Days": p.hasNodeHealthDataForPeriod(30 * 24 * time.Hour),
+		},
+	}
+}
+
+// hasNodeHealthDataForPeriod checks if we have node health data for a given period
+func (p *PostgreSQLChartService) hasNodeHealthDataForPeriod(period time.Duration) bool {
+	query := `SELECT COUNT(*) FROM node_health WHERE checked_at > $1`
+	cutoff := time.Now().Add(-period)
+	
+	var count int
+	err := p.db.QueryRow(query, cutoff).Scan(&count)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+ 

@@ -27,9 +27,9 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  30 * time.Second, // Reduced for testing
-		RequestTimeout: 10 * time.Second,
-		MaxConcurrency: 10,
+		CheckInterval:  10 * time.Second, // Even faster for immediate testing
+		RequestTimeout: 15 * time.Second, // Increased timeout for better reliability
+		MaxConcurrency: 15,               // More concurrent checks
 	}
 }
 

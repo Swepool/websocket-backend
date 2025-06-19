@@ -244,24 +244,8 @@ func (c *EnhancedChartService) buildChartData(now time.Time) (map[string]interfa
 			"totalTransfers":      totalTransfers,
 			"serverUptimeSeconds": time.Since(now.Add(-time.Hour)).Seconds(),
 		},
-		"latencyData": c.latencyData,
-		"nodeHealthData": map[string]interface{}{
-			"dataAvailability": map[string]interface{}{
-				"hasMinute": c.hasDataForPeriod("1m"),
-				"hasHour":   c.hasDataForPeriod("1h"),
-				"hasDay":    c.hasDataForPeriod("1d"),
-				"has7Days":  c.hasDataForPeriod("7d"),
-				"has14Days": c.hasDataForPeriod("14d"),
-				"has30Days": c.hasDataForPeriod("30d"),
-			},
-			"totalNodes":       len(c.nodeHealthData),
-			"healthyNodes":     c.countHealthyNodes(),
-			"degradedNodes":    c.countDegradedNodes(),
-			"unhealthyNodes":   c.countUnhealthyNodes(),
-			"avgResponseTime":  c.calculateAvgResponseTime(),
-			"nodesWithRpcs":    c.getNodesWithRpcs(),
-			"chainHealthStats": c.getChainHealthStats(),
-		},
+		"latencyData": c.getLatencyDataFromDatabase(),
+		"nodeHealthData": c.getNodeHealthDataFromDatabase(),
 		// Add dataAvailability at the root level for charts to use
 		"dataAvailability": map[string]interface{}{
 			"hasMinute": c.hasDataForPeriod("1m"),
@@ -310,17 +294,26 @@ func (c *EnhancedChartService) getTransferRatesWithChanges(now time.Time) (Front
 		}
 		
 		// Previous period count for percentage change
-		prevSince := since.Add(-duration)
-		prevUntil := since
+		// For proper comparison, we need the count from the equivalent previous period
+		prevSince := now.Add(-2 * duration)  // Start of previous period
+		prevUntil := now.Add(-duration)      // End of previous period (start of current)
 		var prevCount int64
-		c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+		err = c.db.QueryRow("SELECT COUNT(*) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
 			prevSince.Unix(), prevUntil.Unix()).Scan(&prevCount)
+		if err != nil {
+			prevCount = 0
+		}
 		
 		// Calculate percentage change
 		var percentageChange float64
 		if prevCount > 0 {
 			percentageChange = ((float64(currentCount) - float64(prevCount)) / float64(prevCount)) * 100
+		} else if currentCount > 0 {
+			percentageChange = 100.0 // 100% increase from 0
 		}
+		
+		utils.LogDebug("CHART_SERVICE", "Period %s: current=%d, prev=%d, change=%.1f%%", 
+			period, currentCount, prevCount, percentageChange)
 		
 		// Assign to appropriate field
 		switch period {
@@ -559,40 +552,58 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 			}
 		}
 		
-		// Calculate percentage changes for previous period using cached data when possible
-		prevTimeScale := getPreviousTimeScale(timeScale)
-		var prevSenderCount, prevReceiverCount, prevTotalCount int64
+		// Calculate percentage changes using time-based comparison (more reliable)
+		prevSince := now.Add(-2 * duration)  // Start of previous period
+		prevUntil := now.Add(-duration)      // End of previous period
 		
-		if prevTimeScale != "" {
-			// Try cached data for previous period
-			err := c.db.QueryRow(`
-				SELECT 
-					(data_json->'uniqueSenders')::int,
-					(data_json->'uniqueReceivers')::int, 
-					(data_json->'uniqueTotal')::int
-				FROM chart_summaries 
-				WHERE chart_type = 'wallet_stats' AND time_scale = $1 
-				ORDER BY updated_at DESC LIMIT 1`, prevTimeScale).Scan(&prevSenderCount, &prevReceiverCount, &prevTotalCount)
-			
-			if err != nil {
-				// Fallback: estimate previous period as 80% of current (reasonable assumption)
-				prevSenderCount = int64(float64(senderCount) * 0.8)
-				prevReceiverCount = int64(float64(receiverCount) * 0.8)
-				prevTotalCount = int64(float64(totalCount) * 0.8)
-			}
+		var prevSenderCount, prevReceiverCount int64
+		
+		// Get previous period sender count
+		err = c.db.QueryRow("SELECT COUNT(DISTINCT sender) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+			prevSince.Unix(), prevUntil.Unix()).Scan(&prevSenderCount)
+		if err != nil {
+			prevSenderCount = 0
+		}
+		
+		// Get previous period receiver count  
+		err = c.db.QueryRow("SELECT COUNT(DISTINCT receiver) FROM transfers WHERE timestamp > $1 AND timestamp <= $2", 
+			prevSince.Unix(), prevUntil.Unix()).Scan(&prevReceiverCount)
+		if err != nil {
+			prevReceiverCount = 0
+		}
+		
+		// Calculate previous total (with overlap estimation)
+		prevTotalCount := prevSenderCount + prevReceiverCount
+		if prevSenderCount > 0 && prevReceiverCount > 0 {
+			overlapEstimate := int64(float64(min(prevSenderCount, prevReceiverCount)) * 0.3)
+			prevTotalCount -= overlapEstimate
 		}
 		
 		// Calculate percentage changes
 		var senderChange, receiverChange, totalChange float64
+		
 		if prevSenderCount > 0 {
 			senderChange = ((float64(senderCount) - float64(prevSenderCount)) / float64(prevSenderCount)) * 100
+		} else if senderCount > 0 {
+			senderChange = 100.0
 		}
+		
 		if prevReceiverCount > 0 {
 			receiverChange = ((float64(receiverCount) - float64(prevReceiverCount)) / float64(prevReceiverCount)) * 100
+		} else if receiverCount > 0 {
+			receiverChange = 100.0
 		}
+		
 		if prevTotalCount > 0 {
 			totalChange = ((float64(totalCount) - float64(prevTotalCount)) / float64(prevTotalCount)) * 100
+		} else if totalCount > 0 {
+			totalChange = 100.0
 		}
+		
+		utils.LogDebug("CHART_SERVICE", "Wallet %s: senders=%d->%d (%.1f%%), receivers=%d->%d (%.1f%%), total=%d->%d (%.1f%%)", 
+			periodName, prevSenderCount, senderCount, senderChange, 
+			prevReceiverCount, receiverCount, receiverChange,
+			prevTotalCount, totalCount, totalChange)
 		
 		// Add to result with frontend-expected field names
 		result["senders"+periodName] = senderCount
@@ -608,25 +619,7 @@ func (c *EnhancedChartService) buildActiveWalletRates(rates FrontendTransferRate
 	return result
 }
 
-// Helper function to get previous time scale for percentage calculations
-func getPreviousTimeScale(current string) string {
-	switch current {
-	case "1m":
-		return "" // No previous period for 1 minute
-	case "1h":
-		return "1m" 
-	case "1d":
-		return "1h"
-	case "7d":
-		return "1d"
-	case "14d":
-		return "7d"
-	case "30d":
-		return "14d"
-	default:
-		return ""
-	}
-}
+// Helper function to get previous time scale for percentage calculations (deprecated - now using time-based comparison)
 
 // Helper function for min calculation
 func min(a, b int64) int64 {
@@ -1154,22 +1147,264 @@ func (c *EnhancedChartService) GetNodeHealthSummary() (*models.NodeHealthSummary
 	}, nil
 }
 
-// hasNodeHealthDataForPeriod checks if we have node health data for a given period
+// hasNodeHealthDataForPeriod checks if we have node health data for a given period (for in-memory data)
 func (c *EnhancedChartService) hasNodeHealthDataForPeriod(period time.Duration) bool {
-	query := `
-		SELECT COUNT(*) 
-		FROM node_health 
-		WHERE checked_at > ?
-	`
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
 	
-	cutoff := time.Now().Add(-period).Unix()
+	cutoff := time.Now().Add(-period)
+	for _, node := range c.nodeHealthData {
+		nodeCheckTime := time.Unix(node.LastCheckTime, 0)
+		if nodeCheckTime.After(cutoff) {
+			return true
+		}
+	}
+	return false
+}
+
+// getLatencyDataFromDatabase retrieves the latest latency data from database
+func (c *EnhancedChartService) getLatencyDataFromDatabase() []interface{} {
+	query := `
+		SELECT DISTINCT 
+			l1.source_chain, l1.dest_chain, l1.source_name, l1.dest_name,
+			l1.packet_ack_p5, l1.packet_ack_median, l1.packet_ack_p95,
+			l1.packet_recv_p5, l1.packet_recv_median, l1.packet_recv_p95,
+			l1.write_ack_p5, l1.write_ack_median, l1.write_ack_p95
+		FROM latency_data l1
+		INNER JOIN (
+			SELECT source_chain, dest_chain, MAX(fetched_at) as max_fetched
+			FROM latency_data 
+			GROUP BY source_chain, dest_chain
+		) l2 ON l1.source_chain = l2.source_chain 
+			AND l1.dest_chain = l2.dest_chain 
+			AND l1.fetched_at = l2.max_fetched
+		ORDER BY l1.source_name, l1.dest_name`
+	
+	rows, err := c.db.Query(query)
+	if err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to query latency data: %v", err)
+		return []interface{}{}
+	}
+	defer rows.Close()
+	
+	var latencyData []interface{}
+	for rows.Next() {
+		var sourceChain, destChain, sourceName, destName string
+		var packetAckP5, packetAckMedian, packetAckP95 float64
+		var packetRecvP5, packetRecvMedian, packetRecvP95 float64
+		var writeAckP5, writeAckMedian, writeAckP95 float64
+		
+		err := rows.Scan(
+			&sourceChain, &destChain, &sourceName, &destName,
+			&packetAckP5, &packetAckMedian, &packetAckP95,
+			&packetRecvP5, &packetRecvMedian, &packetRecvP95,
+			&writeAckP5, &writeAckMedian, &writeAckP95,
+		)
+		
+		if err != nil {
+			utils.LogError("CHART_SERVICE", "Failed to scan latency row: %v", err)
+			continue
+		}
+		
+		latency := map[string]interface{}{
+			"sourceChain":      sourceChain,
+			"destinationChain": destChain,
+			"sourceName":       sourceName,
+			"destinationName":  destName,
+			"packetAck": map[string]interface{}{
+				"p5":     packetAckP5,
+				"median": packetAckMedian,
+				"p95":    packetAckP95,
+			},
+			"packetRecv": map[string]interface{}{
+				"p5":     packetRecvP5,
+				"median": packetRecvMedian,
+				"p95":    packetRecvP95,
+			},
+			"writeAck": map[string]interface{}{
+				"p5":     writeAckP5,
+				"median": writeAckMedian,
+				"p95":    writeAckP95,
+			},
+		}
+		
+		latencyData = append(latencyData, latency)
+	}
+	
+	utils.LogDebug("CHART_SERVICE", "Retrieved %d latency records from database", len(latencyData))
+	return latencyData
+}
+
+// getNodeHealthDataFromDatabase retrieves node health data from database
+func (c *EnhancedChartService) getNodeHealthDataFromDatabase() map[string]interface{} {
+	// Get latest health data
+	query := `
+		SELECT 
+			nh1.chain_id, nh1.chain_name, nh1.rpc_url, nh1.rpc_type, 
+			nh1.status, nh1.response_time_ms, nh1.latest_block_height, 
+			nh1.error_message, nh1.uptime, nh1.checked_at
+		FROM node_health nh1
+		INNER JOIN (
+			SELECT rpc_url, MAX(checked_at) as max_checked
+			FROM node_health 
+			WHERE checked_at > NOW() - INTERVAL '1 hour'
+			GROUP BY rpc_url
+		) nh2 ON nh1.rpc_url = nh2.rpc_url 
+			AND nh1.checked_at = nh2.max_checked
+		ORDER BY nh1.chain_name, nh1.rpc_url`
+	
+	rows, err := c.db.Query(query)
+	if err != nil {
+		utils.LogError("CHART_SERVICE", "Failed to query node health data: %v", err)
+		return map[string]interface{}{
+			"totalNodes":       0,
+			"healthyNodes":     0,
+			"degradedNodes":    0,
+			"unhealthyNodes":   0,
+			"avgResponseTime":  0.0,
+			"nodesWithRpcs":    []interface{}{},
+			"chainHealthStats": map[string]interface{}{},
+			"dataAvailability": map[string]interface{}{
+				"hasMinute": false,
+				"hasHour":   false,
+				"hasDay":    false,
+				"has7Days":  false,
+				"has14Days": false,
+				"has30Days": false,
+			},
+		}
+	}
+	defer rows.Close()
+	
+	var nodes []interface{}
+	totalNodes := 0
+	healthyNodes := 0
+	degradedNodes := 0
+	unhealthyNodes := 0
+	totalResponseTime := 0
+	responseTimeCount := 0
+	chainStats := make(map[string]map[string]interface{})
+	
+	for rows.Next() {
+		var chainID, chainName, rpcURL, rpcType, status, errorMessage string
+		var responseTimeMs int
+		var blockHeight *int64
+		var uptime float64
+		var checkedAt time.Time
+		
+		err := rows.Scan(&chainID, &chainName, &rpcURL, &rpcType, &status, 
+			&responseTimeMs, &blockHeight, &errorMessage, &uptime, &checkedAt)
+		if err != nil {
+			utils.LogError("CHART_SERVICE", "Failed to scan node health row: %v", err)
+			continue
+		}
+		
+		totalNodes++
+		
+		// Count by status
+		switch status {
+		case "healthy":
+			healthyNodes++
+			if responseTimeMs > 0 {
+				totalResponseTime += responseTimeMs
+				responseTimeCount++
+			}
+		case "degraded":
+			degradedNodes++
+			if responseTimeMs > 0 {
+				totalResponseTime += responseTimeMs
+				responseTimeCount++
+			}
+		case "unhealthy":
+			unhealthyNodes++
+		}
+		
+		// Build node info
+		nodeInfo := map[string]interface{}{
+			"chainId":      chainID,
+			"chainName":    chainName,
+			"rpcUrl":       rpcURL,
+			"rpcType":      rpcType,
+			"status":       status,
+			"responseTime": responseTimeMs,
+			"blockHeight":  blockHeight,
+			"uptime":       uptime,
+			"lastCheck":    checkedAt.Unix(),
+		}
+		if errorMessage != "" {
+			nodeInfo["error"] = errorMessage
+		}
+		nodes = append(nodes, nodeInfo)
+		
+		// Aggregate chain stats
+		if _, exists := chainStats[chainID]; !exists {
+			chainStats[chainID] = map[string]interface{}{
+				"chainName":      chainName,
+				"totalNodes":     0,
+				"healthyNodes":   0,
+				"degradedNodes":  0,
+				"unhealthyNodes": 0,
+				"healthScore":    0.0,
+			}
+		}
+		
+		stat := chainStats[chainID]
+		stat["totalNodes"] = stat["totalNodes"].(int) + 1
+		
+		switch status {
+		case "healthy":
+			stat["healthyNodes"] = stat["healthyNodes"].(int) + 1
+		case "degraded":
+			stat["degradedNodes"] = stat["degradedNodes"].(int) + 1
+		case "unhealthy":
+			stat["unhealthyNodes"] = stat["unhealthyNodes"].(int) + 1
+		}
+		
+		// Update health score
+		total := stat["totalNodes"].(int)
+		healthy := stat["healthyNodes"].(int)
+		if total > 0 {
+			stat["healthScore"] = float64(healthy) / float64(total) * 100
+		}
+	}
+	
+	// Calculate average response time
+	avgResponseTime := 0.0
+	if responseTimeCount > 0 {
+		avgResponseTime = float64(totalResponseTime) / float64(responseTimeCount)
+	}
+	
+	utils.LogDebug("CHART_SERVICE", "Retrieved node health summary: %d nodes (%d healthy, %d degraded, %d unhealthy)", 
+		totalNodes, healthyNodes, degradedNodes, unhealthyNodes)
+	
+	return map[string]interface{}{
+		"totalNodes":       totalNodes,
+		"healthyNodes":     healthyNodes,
+		"degradedNodes":    degradedNodes,
+		"unhealthyNodes":   unhealthyNodes,
+		"avgResponseTime":  avgResponseTime,
+		"nodesWithRpcs":    nodes,
+		"chainHealthStats": chainStats,
+		"dataAvailability": map[string]interface{}{
+			"hasMinute": totalNodes > 0,
+			"hasHour":   totalNodes > 0,
+			"hasDay":    c.hasNodeHealthDataForDatabasePeriod(24 * time.Hour),
+			"has7Days":  c.hasNodeHealthDataForDatabasePeriod(7 * 24 * time.Hour),
+			"has14Days": c.hasNodeHealthDataForDatabasePeriod(14 * 24 * time.Hour),
+			"has30Days": c.hasNodeHealthDataForDatabasePeriod(30 * 24 * time.Hour),
+		},
+	}
+}
+
+// hasNodeHealthDataForDatabasePeriod checks if we have node health data for a given period in database
+func (c *EnhancedChartService) hasNodeHealthDataForDatabasePeriod(period time.Duration) bool {
+	query := `SELECT COUNT(*) FROM node_health WHERE checked_at > $1`
+	cutoff := time.Now().Add(-period)
 	
 	var count int
 	err := c.db.QueryRow(query, cutoff).Scan(&count)
 	if err != nil {
-		utils.LogError("CHART_SERVICE", "Failed to check node health data availability: %v", err)
 		return false
 	}
-	
 	return count > 0
 } 

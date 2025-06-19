@@ -22,7 +22,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		GraphQLURL:      "https://staging.graphql.union.build/v1/graphql",
-		RefreshInterval: 10 * time.Minute,
+		RefreshInterval: 2 * time.Minute, // Faster refresh for latency data
 	}
 }
 
