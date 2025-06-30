@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"websocket-backend-new/api/graphql"
-	"websocket-backend-new/internal/utils"
-	"websocket-backend-new/models"
+	"websocket-backend/api/graphql"
+	"websocket-backend/internal/utils"
+	"websocket-backend/models"
 )
 
 // Config holds node health checker configuration
@@ -23,13 +23,13 @@ type Config struct {
 	MaxConcurrency  int           `json:"maxConcurrency"`  // Max concurrent health checks (default: 10)
 }
 
-// DefaultConfig returns default health checker configuration
-func DefaultConfig() Config {
+// DefaultNodeHealthConfig returns default node health configuration
+func DefaultNodeHealthConfig() Config {
 	return Config{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  10 * time.Second, // Even faster for immediate testing
-		RequestTimeout: 15 * time.Second, // Increased timeout for better reliability
-		MaxConcurrency: 15,               // More concurrent checks
+		CheckInterval:  5 * time.Minute, // Check every 5 minutes
+		RequestTimeout: 10 * time.Second, // 10 second timeout per request
+		MaxConcurrency: 10,               // Max 10 concurrent health checks
 	}
 }
 
@@ -655,6 +655,123 @@ func (s *Service) GetHealthData() []models.NodeHealthData {
 	}
 	
 	return result
+}
+
+// GetHealthDataInterface returns current health data as []interface{} for chart broadcaster
+func (s *Service) GetHealthDataInterface() []interface{} {
+	// Return the summary object that the frontend expects, not the raw array
+	summary := s.GetHealthSummary()
+	return []interface{}{summary}
+}
+
+// GetHealthSummary returns health data in the NodeHealthSummary format expected by the frontend
+func (s *Service) GetHealthSummary() interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	// Convert health data to interface{} array for nodesWithRpcs
+	nodesWithRpcs := make([]interface{}, 0, len(s.healthData))
+	
+	// Count status types and calculate total response time
+	var healthyNodes, degradedNodes, unhealthyNodes int
+	var totalResponseTime int
+	var totalNodes int
+	
+	chainHealthStats := make(map[string]interface{})
+	chainCounts := make(map[string]map[string]int) // chainName -> {healthy, degraded, unhealthy, total}
+	chainResponseTimes := make(map[string][]int)   // chainName -> response times
+	
+	for _, data := range s.healthData {
+		// Convert to interface{} for frontend
+		nodeInterface := map[string]interface{}{
+			"chainId":         data.ChainID,
+			"chainName":       data.ChainName,
+			"rpcUrl":          data.RpcURL,
+			"rpcType":         data.RpcType,
+			"status":          data.Status,
+			"responseTimeMs":  data.ResponseTimeMs,
+			"lastCheckTime":   data.LastCheckTime,
+			"uptime":          data.Uptime,
+		}
+		
+		// Add optional fields
+		if data.LatestBlockHeight != nil {
+			nodeInterface["latestBlockHeight"] = *data.LatestBlockHeight
+		}
+		if data.ErrorMessage != "" {
+			nodeInterface["errorMessage"] = data.ErrorMessage
+		}
+		
+		nodesWithRpcs = append(nodesWithRpcs, nodeInterface)
+		
+		// Count status types
+		totalNodes++
+		switch data.Status {
+		case "healthy":
+			healthyNodes++
+		case "degraded":
+			degradedNodes++
+		case "unhealthy":
+			unhealthyNodes++
+		}
+		
+		// Track response time
+		totalResponseTime += data.ResponseTimeMs
+		
+		// Track per-chain stats
+		if chainCounts[data.ChainName] == nil {
+			chainCounts[data.ChainName] = make(map[string]int)
+		}
+		chainCounts[data.ChainName]["total"]++
+		chainCounts[data.ChainName][data.Status]++
+		chainResponseTimes[data.ChainName] = append(chainResponseTimes[data.ChainName], data.ResponseTimeMs)
+	}
+	
+	// Calculate per-chain health stats
+	for chainName, counts := range chainCounts {
+		avgResponseTime := 0.0
+		if len(chainResponseTimes[chainName]) > 0 {
+			sum := 0
+			for _, rt := range chainResponseTimes[chainName] {
+				sum += rt
+			}
+			avgResponseTime = float64(sum) / float64(len(chainResponseTimes[chainName]))
+		}
+		
+		// Calculate uptime percentage (simplified - healthy + degraded nodes)
+		uptime := 0.0
+		if counts["total"] > 0 {
+			healthyAndDegraded := counts["healthy"] + counts["degraded"]
+			uptime = float64(healthyAndDegraded) / float64(counts["total"]) * 100
+		}
+		
+		chainHealthStats[chainName] = map[string]interface{}{
+			"chainName":       chainName,
+			"healthyNodes":    counts["healthy"],
+			"totalNodes":      counts["total"],
+			"avgResponseTime": avgResponseTime,
+			"uptime":          uptime,
+		}
+	}
+	
+	// Calculate average response time
+	avgResponseTime := 0.0
+	if totalNodes > 0 {
+		avgResponseTime = float64(totalResponseTime) / float64(totalNodes)
+	}
+	
+	// Create the summary object that matches the frontend interface
+	summary := map[string]interface{}{
+		"totalNodes":       totalNodes,
+		"healthyNodes":     healthyNodes,
+		"degradedNodes":    degradedNodes,
+		"unhealthyNodes":   unhealthyNodes,
+		"avgResponseTime":  avgResponseTime,
+		"nodesWithRpcs":    nodesWithRpcs,
+		"chainHealthStats": chainHealthStats,
+	}
+	
+	return summary
 }
 
 // isRpcEndpoint checks if a URL is an actual RPC endpoint (not GRPC or REST)

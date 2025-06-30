@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"bytes"
 	"encoding/json"
 )
 
@@ -72,60 +71,6 @@ func MarshalChartWithStaticContent(chartData interface{}) ([]byte, error) {
 	result = append(result, preMarshaledContent.ChartSuffix...)
 	
 	return result, nil
-}
-
-// BuildTransferJSONOptimized builds transfer JSON using a buffer for efficiency
-func BuildTransferJSONOptimized(transferData map[string]interface{}) ([]byte, error) {
-	buf := bytes.NewBuffer(make([]byte, 0, 512)) // Pre-allocate reasonable size
-	
-	// Write prefix
-	buf.Write(preMarshaledContent.TransferPrefix)
-	
-	// Use streaming encoder for transfer data
-	encoder := json.NewEncoder(buf)
-	encoder.SetEscapeHTML(false) // Disable HTML escaping for performance
-	
-	if err := encoder.Encode(transferData); err != nil {
-		return nil, err
-	}
-	
-	// Remove trailing newline from encoder
-	data := buf.Bytes()
-	if len(data) > 0 && data[len(data)-1] == '\n' {
-		data = data[:len(data)-1]
-	}
-	
-	// Add suffix
-	data = append(data, preMarshaledContent.TransferSuffix...)
-	
-	return data, nil
-}
-
-// BuildChartJSONOptimized builds chart JSON using a buffer for efficiency
-func BuildChartJSONOptimized(chartData interface{}) ([]byte, error) {
-	buf := bytes.NewBuffer(make([]byte, 0, 2048)) // Larger buffer for chart data
-	
-	// Write prefix
-	buf.Write(preMarshaledContent.ChartPrefix)
-	
-	// Use streaming encoder for chart data
-	encoder := json.NewEncoder(buf)
-	encoder.SetEscapeHTML(false) // Disable HTML escaping for performance
-	
-	if err := encoder.Encode(chartData); err != nil {
-		return nil, err
-	}
-	
-	// Remove trailing newline from encoder
-	data := buf.Bytes()
-	if len(data) > 0 && data[len(data)-1] == '\n' {
-		data = data[:len(data)-1]
-	}
-	
-	// Add suffix
-	data = append(data, preMarshaledContent.ChartSuffix...)
-	
-	return data, nil
 }
 
  

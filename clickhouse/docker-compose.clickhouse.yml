@@ -1,0 +1,58 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: websocket-backend-clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123"  # HTTP interface
+      - "9000:9000"  # Native TCP interface
+    environment:
+      # Default user configuration
+      CLICKHOUSE_DB: websocket_analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+        
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      # Mount user configuration to allow default user from any host
+      - ./users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+      # Mount schema initialization script
+      - ../internal/storage/clickhouse_schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+        
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: ClickHouse monitoring with Grafana-compatible metrics
+  clickhouse-exporter:
+    image: f1yegor/clickhouse-exporter:latest
+    container_name: websocket-backend-clickhouse-exporter
+    restart: unless-stopped
+    ports:
+      - "9116:9116"
+    environment:
+      CLICKHOUSE_URI: http://clickhouse:8123
+    depends_on:
+      - clickhouse
+    profiles:
+      - monitoring
+
+volumes:
+  clickhouse_data:
+    driver: local
+  clickhouse_logs:
+    driver: local
+
+networks:
+  default:
+    name: websocket-backend-network
+    external: false 

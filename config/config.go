@@ -1,31 +1,21 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"strconv"
 	"time"
-	"websocket-backend-new/internal/pipeline"
-	"websocket-backend-new/internal/chains"
-	"websocket-backend-new/internal/fetcher"
-	"websocket-backend-new/internal/processor"
-	"websocket-backend-new/internal/scheduler"
-	"websocket-backend-new/internal/database"
-	"websocket-backend-new/internal/broadcaster"
-	"websocket-backend-new/internal/nodehealth"
 )
 
 // Config holds all application configuration
 type Config struct {
-	Server      ServerConfig        `json:"server"`
-	Chains      chains.Config       `json:"chains"`
-	Pipeline    pipeline.Config     `json:"pipeline"`
-	Fetcher     fetcher.Config      `json:"fetcher"`
-	Processor   processor.Config    `json:"processor"`
-	Scheduler   scheduler.Config    `json:"scheduler"`
-	Database    database.Config     `json:"database"`
-	Broadcaster broadcaster.Config  `json:"broadcaster"`
-	NodeHealth  nodehealth.Config   `json:"nodeHealth"`
+	Server          ServerConfig          `json:"server"`
+	Fetcher         FetcherConfig         `json:"fetcher"`
+	BackwardFetcher BackwardFetcherConfig `json:"backwardFetcher"`
+	Processor       ProcessorConfig       `json:"processor"`
+	Batcher         BatcherConfig         `json:"batcher"`
+	Broadcaster     BroadcasterConfig     `json:"broadcaster"`
+	Database        DatabaseConfig        `json:"database"`
+	NodeHealth      NodeHealthConfig      `json:"nodeHealth"`
 }
 
 // ServerConfig holds server-specific configuration
@@ -34,150 +24,162 @@ type ServerConfig struct {
 	Timeout time.Duration `json:"timeout"`
 }
 
-// DefaultConfig returns default configuration for the entire application
-func DefaultConfig() Config {
-	fetcherConfig := DefaultFetcherConfig()
-	pipelineConfig := pipeline.DefaultConfig()
-	pipelineConfig.Fetcher = fetcherConfig
-	
+// FetcherConfig holds fetcher configuration
+type FetcherConfig struct {
+	PollInterval time.Duration `json:"pollInterval"`
+	BatchSize    int           `json:"batchSize"`
+	MockMode     bool          `json:"mockMode"`
+	GraphQLURL   string        `json:"graphqlUrl"`
+}
+
+// BackwardFetcherConfig holds backward fetcher configuration
+type BackwardFetcherConfig struct {
+	Enabled                bool          `json:"enabled"`                // Whether backward sync is enabled
+	MaxDepthDays           int           `json:"maxDepthDays"`           // Maximum number of days to sync backwards
+	BatchSize              int           `json:"batchSize"`              // Batch size for GraphQL queries
+	GraphQLURL             string        `json:"graphqlUrl"`             // GraphQL endpoint URL
+	HTTPTimeout            time.Duration `json:"httpTimeout"`            // HTTP client timeout
+	RetryDelay             time.Duration `json:"retryDelay"`             // Delay between failed request retries
+	DatabaseRetryDelay     time.Duration `json:"databaseRetryDelay"`     // Delay between failed database saves
+	RateLimitDelay         time.Duration `json:"rateLimitDelay"`         // Delay between successful requests (rate limiting)
+	BackpressureTimeoutMs  int           `json:"backpressureTimeoutMs"`  // Timeout for database backpressure in milliseconds
+}
+
+// ProcessorConfig holds processor configuration
+type ProcessorConfig struct {
+	NaturalFlow      bool          `json:"naturalFlow"`      // Enable natural flow timing for WebSocket broadcasts
+	FlowMinDelay     time.Duration `json:"flowMinDelay"`     // Minimum delay between transfers
+	FlowMaxDelay     time.Duration `json:"flowMaxDelay"`     // Maximum delay between transfers  
+	MaxBurstSize     int           `json:"maxBurstSize"`     // Max transfers to send immediately (rest get natural timing)
+}
+
+// BatcherConfig holds batcher configuration
+type BatcherConfig struct {
+	FlushInterval time.Duration `json:"flushInterval"`
+	BatchSize     int           `json:"batchSize"`
+	MaxRetries    int           `json:"maxRetries"`
+}
+
+// BroadcasterConfig holds broadcaster configuration
+type BroadcasterConfig struct {
+	MaxClients      int  `json:"maxClients"`
+	BufferSize      int  `json:"bufferSize"`
+	DropSlowClients bool `json:"dropSlowClients"`
+	NumShards       int  `json:"numShards"`
+	WorkersPerShard int  `json:"workersPerShard"`
+}
+
+// DatabaseConfig holds ClickHouse database configuration
+type DatabaseConfig struct {
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Database  string `json:"database"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	Debug     bool   `json:"debug"`
+	BatchSize int    `json:"batchSize"`
+}
+
+// NodeHealthConfig holds node health checker configuration
+type NodeHealthConfig struct {
+	GraphQLURL      string        `json:"graphqlUrl"`
+	CheckInterval   time.Duration `json:"checkInterval"`
+	RequestTimeout  time.Duration `json:"requestTimeout"`
+	MaxConcurrency  int           `json:"maxConcurrency"`
+}
+
+// LoadConfig returns the single configuration for the application
+func LoadConfig() Config {
 	return Config{
 		Server: ServerConfig{
-			Port:    ":8080",
-			Timeout: 30 * time.Second,
+			Port:    getEnvString("SERVER_PORT", ":8080"),
+			Timeout: getEnvDuration("SERVER_TIMEOUT", 30*time.Second),
 		},
-		Chains:      chains.DefaultConfig(),
-		Pipeline:    pipelineConfig,
-		Fetcher:     fetcherConfig,
-		Processor:   processor.DefaultConfig(),
-		Scheduler:   scheduler.DefaultConfig(),
-		Database:    database.DefaultConfig(),
-		Broadcaster: getDefaultBroadcasterConfig(),
-		NodeHealth:  nodehealth.DefaultConfig(),
+		Fetcher: FetcherConfig{
+			PollInterval: getEnvDuration("FETCHER_POLL_INTERVAL", 500*time.Millisecond),
+			BatchSize:    getEnvInt("FETCHER_BATCH_SIZE", 100),
+			MockMode:     getEnvBool("FETCHER_MOCK_MODE", false),
+			GraphQLURL:   getEnvString("FETCHER_GRAPHQL_URL", "https://staging.graphql.union.build/v1/graphql"),
+		},
+		BackwardFetcher: BackwardFetcherConfig{
+			Enabled:               getEnvBool("BACKWARD_FETCHER_ENABLED", true),              // Enabled by default
+			MaxDepthDays:          getEnvInt("BACKWARD_FETCHER_MAX_DEPTH_DAYS", 30),         // 30 days default
+			BatchSize:             getEnvInt("BACKWARD_FETCHER_BATCH_SIZE", 100),            // Same as forward fetcher
+			GraphQLURL:            getEnvString("BACKWARD_FETCHER_GRAPHQL_URL", "https://staging.graphql.union.build/v1/graphql"),
+			HTTPTimeout:           getEnvDuration("BACKWARD_FETCHER_HTTP_TIMEOUT", 30*time.Second),
+			RetryDelay:            getEnvDuration("BACKWARD_FETCHER_RETRY_DELAY", 1*time.Second),
+			DatabaseRetryDelay:    getEnvDuration("BACKWARD_FETCHER_DB_RETRY_DELAY", 500*time.Millisecond),
+			RateLimitDelay:        getEnvDuration("BACKWARD_FETCHER_RATE_LIMIT_DELAY", 100*time.Millisecond),
+			BackpressureTimeoutMs: getEnvInt("BACKWARD_FETCHER_BACKPRESSURE_TIMEOUT_MS", 1000),
+		},
+		Processor: ProcessorConfig{
+			NaturalFlow:  getEnvBool("PROCESSOR_NATURAL_FLOW", true),
+			FlowMinDelay: getEnvDuration("PROCESSOR_FLOW_MIN_DELAY", 50*time.Millisecond),
+			FlowMaxDelay: getEnvDuration("PROCESSOR_FLOW_MAX_DELAY", 200*time.Millisecond),
+			MaxBurstSize: getEnvInt("PROCESSOR_MAX_BURST_SIZE", 1),
+		},
+		Batcher: BatcherConfig{
+			FlushInterval: getEnvDuration("BATCHER_FLUSH_INTERVAL", 10*time.Second),
+			BatchSize:     getEnvInt("BATCHER_BATCH_SIZE", 2000),
+			MaxRetries:    getEnvInt("BATCHER_MAX_RETRIES", 3),
+		},
+		Broadcaster: BroadcasterConfig{
+			MaxClients:      getEnvInt("BROADCASTER_MAX_CLIENTS", 1000),
+			BufferSize:      getEnvInt("BROADCASTER_BUFFER_SIZE", 1000),
+			DropSlowClients: getEnvBool("BROADCASTER_DROP_SLOW_CLIENTS", true),
+			NumShards:       getEnvInt("BROADCASTER_NUM_SHARDS", 4),
+			WorkersPerShard: getEnvInt("BROADCASTER_WORKERS_PER_SHARD", 4),
+		},
+		Database: DatabaseConfig{
+			Host:      getEnvString("CLICKHOUSE_HOST", "localhost"),
+			Port:      getEnvInt("CLICKHOUSE_PORT", 9000),
+			Database:  getEnvString("CLICKHOUSE_DATABASE", "websocket_analytics"),
+			Username:  getEnvString("CLICKHOUSE_USER", "websocket_user"),
+			Password:  getEnvString("CLICKHOUSE_PASSWORD", ""),
+			Debug:     getEnvBool("CLICKHOUSE_DEBUG", false),
+			BatchSize: getEnvInt("CLICKHOUSE_BATCH_SIZE", 10000),
+		},
+		NodeHealth: NodeHealthConfig{
+			GraphQLURL:     getEnvString("NODE_HEALTH_GRAPHQL_URL", "https://staging.graphql.union.build/v1/graphql"),
+			CheckInterval:  getEnvDuration("NODE_HEALTH_CHECK_INTERVAL", 10*time.Second),
+			RequestTimeout: getEnvDuration("NODE_HEALTH_REQUEST_TIMEOUT", 15*time.Second),
+			MaxConcurrency: getEnvInt("NODE_HEALTH_MAX_CONCURRENCY", 15),
+		},
 	}
 }
 
-// DefaultFetcherConfig returns optimized fetcher configuration for real transfers
-func DefaultFetcherConfig() fetcher.Config {
-	return fetcher.Config{
-		PollInterval: 500 * time.Millisecond, // Optimal 500ms polling for real-time transfers
-		BatchSize:    100,                    // Larger batches for better throughput
-		MockMode:     false,                  // Use real data
-		GraphQLURL:   "https://staging.graphql.union.build/v1/graphql",
+// Helper functions for clean environment variable handling
+
+func getEnvString(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
+	return defaultValue
 }
 
-// ConfigWithSharding returns configuration optimized for sharded broadcasting
-func ConfigWithSharding(expectedClients int) Config {
-	config := DefaultConfig()
-	
-	// Use recommended sharding configuration
-	config.Broadcaster = broadcaster.GetRecommendedConfig(expectedClients)
-	
-	return config
-}
-
-// HighPerformanceConfig returns configuration for high-load scenarios
-func HighPerformanceConfig() Config {
-	config := DefaultConfig()
-	
-	// High-performance broadcaster settings (always sharded)
-	config.Broadcaster = broadcaster.Config{
-		MaxClients:      2000,
-		BufferSize:      256,
-		DropSlowClients: true,
-		NumShards:       8,
-		WorkersPerShard: 8,
-	}
-	
-	// Optimized fetcher settings
-	config.Fetcher.PollInterval = 500 * time.Millisecond
-	config.Fetcher.BatchSize = 200
-	
-	// Optimized scheduler settings for timestamp-based timing
-	config.Pipeline.Scheduler.LiveOffset = 1 * time.Second     // Faster live offset for high performance
-	config.Pipeline.Scheduler.MaxBacklog = 5 * time.Second     // Shorter backlog for responsiveness
-	config.Pipeline.Scheduler.MinInterval = 25 * time.Millisecond // Tighter micro-spacing
-	
-	return config
-}
-
-// getDefaultBroadcasterConfig returns broadcaster config with optimal sharding
-func getDefaultBroadcasterConfig() broadcaster.Config {
-	return broadcaster.Config{
-		NumShards:       10,
-		WorkersPerShard: 6,
-		MaxClients:      2000,
-		BufferSize:      256,
-		DropSlowClients: true,
-	}
-}
-
-// DevelopmentConfig returns configuration optimized for development
-func DevelopmentConfig() Config {
-	config := DefaultConfig()
-	
-	// Use single shard for development (simpler debugging)
-	config.Broadcaster.NumShards = 1
-	config.Broadcaster.WorkersPerShard = 2
-	
-	// Keep optimal 500ms polling even in development
-	config.Fetcher.PollInterval = 500 * time.Millisecond
-	config.Fetcher.BatchSize = 50
-	
-	return config
-}
-
-// LoadConfig loads configuration based on environment variables and modes
-func LoadConfig() Config {
-	// Check for configuration mode
-	configMode := "high-performance"
-	
-	switch configMode {
-	case "development":
-		fmt.Printf("Using development configuration\n")
-		return DevelopmentConfig()
-		
-	case "high-performance":
-		fmt.Printf("Using high-performance configuration\n")
-		return HighPerformanceConfig()
-		
-	case "sharded":
-		// Get expected clients from environment
-		expectedClients := 5000 // default
-		if clientsStr := os.Getenv("EXPECTED_CLIENTS"); clientsStr != "" {
-			if parsed, err := strconv.Atoi(clientsStr); err == nil {
-				expectedClients = parsed
-			}
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
 		}
-		fmt.Printf("Using sharded configuration for %d expected clients\n", expectedClients)
-		return ConfigWithSharding(expectedClients)
-		
-	default:
-		// Use default configuration with environment variable overrides
-		appConfig := DefaultConfig()
-		
-		// Optional: configure shard count
-		if shardsStr := os.Getenv("NUM_SHARDS"); shardsStr != "" {
-			if shards, err := strconv.Atoi(shardsStr); err == nil && shards > 0 {
-				appConfig.Broadcaster.NumShards = shards
-			}
-		}
-		
-		// Optional: configure workers per shard
-		if workersStr := os.Getenv("WORKERS_PER_SHARD"); workersStr != "" {
-			if workers, err := strconv.Atoi(workersStr); err == nil && workers > 0 {
-				appConfig.Broadcaster.WorkersPerShard = workers
-			}
-		}
-		
-		// Optional: configure max clients per shard
-		if clientsStr := os.Getenv("MAX_CLIENTS_PER_SHARD"); clientsStr != "" {
-			if clients, err := strconv.Atoi(clientsStr); err == nil && clients > 0 {
-				appConfig.Broadcaster.MaxClients = clients
-			}
-		}
-		
-		fmt.Printf("Using default configuration with environment overrides\n")
-		return appConfig
 	}
-} 
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		return value == "true"
+	}
+	return defaultValue
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+ 

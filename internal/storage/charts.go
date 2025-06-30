@@ -1,10 +1,10 @@
-package database
+package storage
 
 import (
 	"database/sql"
 	"fmt"
 	"time"
-	"websocket-backend-new/internal/utils"
+	"websocket-backend/internal/utils"
 )
 
 // ChartService provides chart data from database queries

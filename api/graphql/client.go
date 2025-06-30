@@ -5,9 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"time"
-	"websocket-backend-new/models"
+	"websocket-backend/models"
 )
 
 // Client represents a GraphQL client
@@ -321,6 +322,9 @@ func (r RawTransfer) ToModel() models.Transfer {
 	// Calculate canonical token symbol
 	canonicalTokenSymbol := r.calculateCanonicalTokenSymbol()
 	
+	// Format base amount with decimals
+	formattedAmount := formatTokenAmount(r.BaseAmount, r.BaseTokenDecimals)
+	
 	return models.Transfer{
 		PacketHash:            r.PacketHash,
 		SortOrder:             r.SortOrder,
@@ -331,7 +335,7 @@ func (r RawTransfer) ToModel() models.Transfer {
 		ReceiverDisplay:       r.ReceiverDisplay,
 		SourceChain:           r.SourceChain.ToModel(),
 		DestinationChain:      r.DestinationChain.ToModel(),
-		BaseAmount:            r.BaseAmount,
+		BaseAmount:            formattedAmount,
 		BaseTokenSymbol:       r.BaseTokenSymbol,
 		CanonicalTokenSymbol:  canonicalTokenSymbol,
 		WrapDirection:         r.WrapDirection,
@@ -341,9 +345,31 @@ func (r RawTransfer) ToModel() models.Transfer {
 }
 
 // calculateCanonicalTokenSymbol determines the canonical token symbol for asset tracking
-// Since base_token_symbol already contains the correct symbol for all transfers,
-// we simply use it directly for canonical tracking
+// This should identify the underlying base asset, not just the display symbol
 func (r RawTransfer) calculateCanonicalTokenSymbol() string {
+	// Priority 1: Use base_token if available (this is the actual token identifier)
+	if r.BaseToken != "" {
+		return r.BaseToken
+	}
+	
+	// Priority 2: Extract unwrapped denomination from base token wrapping metadata
+	if len(r.BaseTokenMeta.Wrapping) > 0 {
+		// Use the unwrapped denomination as the canonical identifier
+		unwrappedDenom := r.BaseTokenMeta.Wrapping[0].UnwrappedDenom
+		if unwrappedDenom != "" {
+			return unwrappedDenom
+		}
+	}
+	
+	// Priority 3: Extract unwrapped denomination from quote token wrapping metadata
+	if len(r.QuoteTokenMeta.Wrapping) > 0 {
+		unwrappedDenom := r.QuoteTokenMeta.Wrapping[0].UnwrappedDenom
+		if unwrappedDenom != "" {
+			return unwrappedDenom
+		}
+	}
+	
+	// Fallback: Use base_token_symbol (display symbol) if no wrapping info available
 	return r.BaseTokenSymbol
 }
 
@@ -524,4 +550,39 @@ func (c *Client) executeQuery(ctx context.Context, query string, variables map[s
 	}
 	
 	return &result, nil
+}
+
+// formatTokenAmount converts base amount string with decimals to a display amount
+// Uses big.Rat for precise decimal arithmetic, preserves FULL precision (no truncation)
+func formatTokenAmount(baseAmount string, decimals int) string {
+	if baseAmount == "" || baseAmount == "0" {
+		return "0"
+	}
+	
+	// Parse the base amount as a big integer
+	baseAmountBig := new(big.Int)
+	_, ok := baseAmountBig.SetString(baseAmount, 10)
+	if !ok {
+		// If parsing fails, return original amount (fallback)
+		return baseAmount
+	}
+	
+	// If no decimals, return as string
+	if decimals <= 0 {
+		return baseAmountBig.String()
+	}
+	
+	// Create divisor as 10^decimals using big.Int
+	divisor := new(big.Int)
+	divisor.Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	
+	// Use big.Rat for exact decimal division
+	rat := new(big.Rat)
+	rat.SetFrac(baseAmountBig, divisor)
+	
+	// Convert to decimal string with FULL precision (no truncation)
+	// Send complete precision to frontend, let it decide how to display
+	formatted := rat.FloatString(decimals)
+	
+	return formatted
 } 

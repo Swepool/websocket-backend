@@ -93,10 +93,4 @@ func TrySend[T any](ch chan<- T, data T, metrics *BackpressureMetrics) bool {
 	}
 }
 
-// GetChannelUtilization returns channel utilization as percentage (0-100)
-func GetChannelUtilization(used, capacity int) float64 {
-	if capacity <= 0 {
-		return 0.0
-	}
-	return float64(used) / float64(capacity) * 100.0
-} 
+ 

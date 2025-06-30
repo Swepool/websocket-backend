@@ -5,124 +5,117 @@ import (
 	"fmt"
 	"sync"
 	"time"
-	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/fetcher"
-	"websocket-backend-new/internal/processor"
-	"websocket-backend-new/internal/scheduler"
-	"websocket-backend-new/internal/broadcaster"
-	"websocket-backend-new/internal/database"
-	"websocket-backend-new/internal/utils"
+	"websocket-backend/config"
+	"websocket-backend/internal/core"
+	"websocket-backend/internal/fetcher"
+	"websocket-backend/internal/services"
+	"websocket-backend/internal/services/nodehealth"
+	"websocket-backend/internal/storage"
+	"websocket-backend/internal/transport"
+	"websocket-backend/internal/utils"
 )
 
-// Coordinator manages the entire simplified pipeline with PostgreSQL-optimized chart system
+// Coordinator manages the clean modular pipeline with clear responsibilities
 type Coordinator struct {
-	syncManager     *fetcher.SyncManager  // Replaced fetcher with SyncManager
-	processor       *processor.Processor
-	scheduler       *scheduler.Scheduler
-	broadcaster     broadcaster.BroadcasterInterface
-	dbWriter        *database.Writer
-	chartService    *database.PostgreSQLChartService  // Always use PostgreSQL optimized service
-	chartUpdater    interface{ UpdateAllChartSummaries() error }
-	chartBroadcaster *database.ChartBroadcaster
+	// Core components
+	syncManager *fetcher.SyncManager
+	processor   *core.Processor
+	batcher     *core.Batcher
+	broadcaster transport.BroadcasterInterface
 	
-	channels    *channels.Channels
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	// Supporting services
+	clickhouseService *storage.ClickHouseService
+	chartBroadcaster  *storage.ChartBroadcaster
+	chainsService     *services.ChainsService
+	latencyService    *services.LatencyService
+	nodeHealthService *nodehealth.Service
+	channels          *core.Channels
+	
+	// Control
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// NewCoordinator creates a new pipeline coordinator with bidirectional sync and enhanced chart system
-func NewCoordinator(config Config, chainProvider fetcher.ChainProvider) (*Coordinator, error) {
-	// Initialize channels
-	ch := channels.NewChannels()
+// NewCoordinator creates a new clean modular pipeline coordinator
+func NewCoordinator(cfg config.Config) (*Coordinator, error) {
+	// Initialize channels for clean communication
+	ch := core.NewChannels()
 	
-	// Initialize database writer first (needed for sync manager)
-	dbWriter, err := database.NewWriter(config.Database, ch)
+	// Initialize ClickHouse service
+	clickhouseService, err := storage.NewClickHouseService(storage.ClickHouseConfig{
+		Host:     cfg.Database.Host,
+		Port:     cfg.Database.Port,
+		Database: cfg.Database.Database,
+		Username: cfg.Database.Username,
+		Password: cfg.Database.Password,
+		Debug:    cfg.Database.Debug,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create database writer: %w", err)
+		return nil, fmt.Errorf("failed to create ClickHouse service: %w", err)
 	}
 	
-	// Initialize SyncManager instead of direct fetcher
-	syncManager := fetcher.NewSyncManager(config.Fetcher, ch, chainProvider, dbWriter)
-	
-	// Configure bidirectional sync settings
-	syncManager.SetBackwardSyncConfig(
-		true,                 // Enable backward sync
-		30,                   // Sync back 30 days for full UI coverage
-		6*time.Hour,         // Start backward sync if gap > 6 hours
-	)
-	
-	utils.LogInfo("COORDINATOR", "Initialized SyncManager with bidirectional sync (30 days depth, 6h gap threshold)")
-	
-	// Initialize other components
-	p := processor.NewProcessor(config.Processor, ch)
-	s := scheduler.NewScheduler(config.Scheduler, ch)
-	
-	// Always use PostgreSQL-optimized chart service (ULTRA FAST)
-	chartService := database.NewPostgreSQLChartService(dbWriter.GetDB())
-	utils.LogInfo("COORDINATOR", "🚀 Always using PostgreSQL-optimized chart service with materialized views")
-	
-	// Check materialized view status
-	if status, err := chartService.GetMaterializedViewStatus(); err == nil {
-		utils.LogInfo("COORDINATOR", "📊 Materialized view status: %+v", status)
+	// Initialize ClickHouse schema
+	if err := clickhouseService.InitializeSchema(context.Background()); err != nil {
+		return nil, fmt.Errorf("failed to initialize ClickHouse schema: %w", err)
 	}
 	
-	utils.LogInfo("COORDINATOR", "✅ PostgreSQL ultra-optimizations active")
+	// Initialize components with clear responsibilities
+	syncManager := fetcher.NewSyncManager(cfg.Fetcher, cfg.BackwardFetcher, ch, nil, clickhouseService)
+	processorComponent := core.NewProcessor(cfg.Processor, ch)
+	batcherComponent := core.NewBatcher(cfg.Batcher, ch, clickhouseService)
+	broadcasterComponent := transport.NewBroadcaster(cfg.Broadcaster, ch)
 	
-	// Load existing latency data from database on startup
-	if err := chartService.LoadLatencyDataFromDB(); err != nil {
-		utils.LogWarn("COORDINATOR", "Failed to load latency data from database: %v", err)
-	}
+	// Set up chart service for initial data on WebSocket connect
+	broadcasterComponent.SetChartService(clickhouseService)
 	
-	utils.LogInfo("COORDINATOR", "Pre-warming chart data cache on startup...")
+	// Initialize services
+	chainsService := services.NewChainsService(services.DefaultChainsConfig())
+	latencyService := services.NewLatencyService(services.DefaultLatencyConfig(), chainsService)
+	nodeHealthService := nodehealth.NewService(nodehealth.DefaultNodeHealthConfig())
 	
-	// Pre-warm chart data cache on startup for fast initial client connections
-	if err := chartService.RefreshCache(); err != nil {
-		utils.LogWarn("COORDINATOR", "Failed to pre-warm chart cache on startup: %v", err)
-	} else {
-		utils.LogInfo("COORDINATOR", "✅ Chart data cache pre-warmed for fast initial connections")
-	}
+	// Set latency service for initial client data
+	clickhouseService.SetLatencyService(latencyService)
 	
-	// Create chart updater for background processing (PostgreSQL-compatible)
-	var chartUpdater interface {
-		UpdateAllChartSummaries() error
-	}
+	// Set node health service for initial client data
+	clickhouseService.SetNodeHealthService(nodeHealthService)
 	
-	chartUpdater = database.NewPostgreSQLChartUpdater(dbWriter.GetDB())
-	utils.LogInfo("COORDINATOR", "🚀 Using PostgreSQL-optimized chart updater")
+	// Create chart broadcaster for periodic chart data updates
+	chartBroadcaster := storage.NewChartBroadcaster(clickhouseService, broadcasterComponent, latencyService, nodeHealthService)
 	
-	// Create broadcaster
-	b := broadcaster.CreateBroadcaster(config.Broadcaster, ch)
-	
-	// Set chart service on broadcaster for initial chart data sending
-	b.SetChartService(chartService)
-	
-	// Create chart broadcaster with enhanced chart service
-	chartBroadcaster := database.NewChartBroadcaster(chartService, b)
+	utils.LogInfo("COORDINATOR", "Created clean modular pipeline:")
+	utils.LogInfo("COORDINATOR", "  → SyncManager: coordinates forward/backward sync")
+	utils.LogInfo("COORDINATOR", "  → Processor: normalizes and routes to WebSocket & database")
+	utils.LogInfo("COORDINATOR", "  → Batcher: accumulates for ClickHouse")
+	utils.LogInfo("COORDINATOR", "  → Broadcaster: WebSocket server")
+	utils.LogInfo("COORDINATOR", "  → ChartBroadcaster: periodic chart data with asset volumes + latency")
+	utils.LogInfo("COORDINATOR", "  → ChainsService: chain metadata monitoring")
+	utils.LogInfo("COORDINATOR", "  → LatencyService: cross-chain latency monitoring")
+	utils.LogInfo("COORDINATOR", "  → NodeHealthService: RPC node health monitoring")
 	
 	return &Coordinator{
-		syncManager:     syncManager,   // Using SyncManager instead of fetcher
-		processor:       p,
-		scheduler:       s,
-		broadcaster:     b,
-		dbWriter:        dbWriter,
-		chartService:    chartService,
-		chartUpdater:    chartUpdater,
-		chartBroadcaster: chartBroadcaster,
-		channels:        ch,
+		syncManager:       syncManager,
+		processor:         processorComponent,
+		batcher:           batcherComponent,
+		broadcaster:       broadcasterComponent,
+		clickhouseService: clickhouseService,
+		chartBroadcaster:  chartBroadcaster,
+		chainsService:     chainsService,
+		latencyService:    latencyService,
+		nodeHealthService: nodeHealthService,
+		channels:          ch,
 	}, nil
 }
 
-// Start begins all pipeline threads with enhanced chart system and bidirectional sync
+// Start begins all components in the clean modular pipeline
 func (c *Coordinator) Start(ctx context.Context) error {
-	utils.LogInfo("COORDINATOR", "Starting enhanced pipeline coordinator with bidirectional sync system")
+	utils.LogInfo("COORDINATOR", "Starting clean modular pipeline")
 	ctx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 	
-	// Start all threads concurrently
-	c.wg.Add(6) // Now 6 threads: sync manager + 4 core + chart updater (broadcaster is event-driven)
-	utils.LogInfo("COORDINATOR", "Starting 6 pipeline threads with bidirectional sync + event-driven chart broadcasting")
+	// Start all components concurrently + chart updates + services
+	c.wg.Add(8) // 4 main components + chart updates + chains service + latency service + node health service
 	
-	// Thread 1: SyncManager (replaces Fetcher - handles both forward and backward sync)
+	// Component 1: SyncManager (coordinates forward + backward sync)
 	go func() {
 		defer c.wg.Done()
 		defer func() {
@@ -133,7 +126,7 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		c.syncManager.Start(ctx)
 	}()
 	
-	// Thread 2: Processor  
+	// Component 2: Processor (normalizes and routes to WebSocket & database)
 	go func() {
 		defer c.wg.Done()
 		defer func() {
@@ -144,29 +137,18 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		c.processor.Start(ctx)
 	}()
 	
-	// Thread 3: Scheduler
+	// Component 3: Batcher (accumulates for ClickHouse)
 	go func() {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				utils.LogError("COORDINATOR", "Scheduler panic recovered: %v", r)
+				utils.LogError("COORDINATOR", "Batcher panic recovered: %v", r)
 			}
 		}()
-		c.scheduler.Start(ctx)
+		c.batcher.Start(ctx)
 	}()
 	
-	// Thread 4: Database Writer
-	go func() {
-		defer c.wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				utils.LogError("COORDINATOR", "Database Writer panic recovered: %v", r)
-			}
-		}()
-		c.dbWriter.Start(ctx)
-	}()
-	
-	// Thread 5: Broadcaster
+	// Component 4: Broadcaster (WebSocket server)
 	go func() {
 		defer c.wg.Done()
 		defer func() {
@@ -177,199 +159,188 @@ func (c *Coordinator) Start(ctx context.Context) error {
 		c.broadcaster.Start(ctx)
 	}()
 	
-	// Thread 6: Chart Updater (triggers event-driven chart broadcasts)
+	// Component 5: Chart Data Updates (periodic stats broadcasting)
 	go func() {
 		defer c.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				utils.LogError("COORDINATOR", "Chart Updater panic recovered: %v", r)
+				utils.LogError("COORDINATOR", "Chart update panic recovered: %v", r)
 			}
 		}()
-		c.startChartUpdater(ctx)
+		c.startChartUpdates(ctx)
 	}()
 	
-	// Initialize chart broadcaster (event-driven, no separate thread needed)
-	c.chartBroadcaster.Start()
+	// Component 6: Chains Service (chain metadata monitoring)
+	go func() {
+		defer c.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				utils.LogError("COORDINATOR", "ChainsService panic recovered: %v", r)
+			}
+		}()
+		c.chainsService.Start(ctx)
+	}()
 	
-	utils.LogInfo("COORDINATOR", "All pipeline threads started successfully with event-driven chart broadcasting")
+	// Component 7: Latency Service (cross-chain latency monitoring)
+	go func() {
+		defer c.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				utils.LogError("COORDINATOR", "LatencyService panic recovered: %v", r)
+			}
+		}()
+		c.latencyService.Start(ctx)
+	}()
 	
-	// Log initial sync status
-	c.logSyncStatus()
+	// Component 8: NodeHealthService (RPC node health monitoring)
+	go func() {
+		defer c.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				utils.LogError("COORDINATOR", "NodeHealthService panic recovered: %v", r)
+			}
+		}()
+		c.nodeHealthService.Start(ctx)
+	}()
+	
+	utils.LogInfo("COORDINATOR", "All components started successfully")
+	
+	// Log initial status
+	c.logPipelineStatus()
 	
 	return nil
 }
 
-// logSyncStatus logs the current bidirectional sync status
-func (c *Coordinator) logSyncStatus() {
-	status := c.syncManager.GetStatus()
-	utils.LogInfo("COORDINATOR", "Bidirectional Sync Status:")
-	utils.LogInfo("COORDINATOR", "  Total transfers: %v", status["total_transfers"])
-	utils.LogInfo("COORDINATOR", "  Forward sync: active")
-	utils.LogInfo("COORDINATOR", "  Backward sync: %v", map[bool]string{true: "active", false: "inactive"}[status["backward_active"].(bool)])
-	utils.LogInfo("COORDINATOR", "  Sync depth: %v days", status["sync_depth_days"])
-	utils.LogInfo("COORDINATOR", "  Gap threshold: %.1f hours", status["gap_threshold_hours"])
+// logPipelineStatus logs the current pipeline status and flow
+func (c *Coordinator) logPipelineStatus() {
+	utils.LogInfo("COORDINATOR", "Clean Modular Pipeline Status:")
+	utils.LogInfo("COORDINATOR", "  Data Flow:")
+	utils.LogInfo("COORDINATOR", "    🔴 Forward Fetcher → [RawTransfers] → Processor → {WebSocket + Database}")
+	utils.LogInfo("COORDINATOR", "    🔵 Backward Fetcher → [DatabaseSaves] → Database (historical gaps)")
+	utils.LogInfo("COORDINATOR", "    Processor → [WebSocketBroadcasts] → Broadcaster (real-time)")
+	utils.LogInfo("COORDINATOR", "    Processor → [BatchedTransfers] → Batcher → ClickHouse (10s/2000tx)")
+	utils.LogInfo("COORDINATOR", "  Components: All running")
+	utils.LogInfo("COORDINATOR", "  Database: ClickHouse analytics")
 }
 
-// startChartUpdater runs the chart updater with configurable interval
-func (c *Coordinator) startChartUpdater(ctx context.Context) {
-	// Make interval configurable based on data size
-	// For large datasets (100M+ records), use longer intervals
-	updateInterval := 60 * time.Second // Increased from 15s for 175M records
-	
-	// TODO: Make this configurable via environment variable
-	// if os.Getenv("CHART_UPDATE_INTERVAL") != "" {
-	//     if interval, err := time.ParseDuration(os.Getenv("CHART_UPDATE_INTERVAL")); err == nil {
-	//         updateInterval = interval
-	//     }
-	// }
-	
-	ticker := time.NewTicker(updateInterval)
-	defer ticker.Stop()
-	
-	utils.LogInfo("COORDINATOR", "Starting chart updater with %v intervals (event-driven broadcasts)", updateInterval)
-	
-	// Run initial update and warm cache
-	if err := c.chartUpdater.UpdateAllChartSummaries(); err != nil {
-		utils.LogError("COORDINATOR", "Initial chart update failed: %v", err)
-	} else {
-		// Proactively warm cache after successful update
-		if err := c.chartService.RefreshCache(); err != nil {
-			utils.LogError("COORDINATOR", "Failed to warm initial cache: %v", err)
-		} else {
-			utils.LogInfo("COORDINATOR", "🔥 Initial chart summaries updated and cache warmed")
-			// Trigger broadcast since cache was updated
-			c.chartBroadcaster.TriggerBroadcast()
-		}
-	}
-	
-	for {
-		select {
-		case <-ctx.Done():
-			utils.LogInfo("COORDINATOR", "Chart updater stopping")
-			return
-		case <-ticker.C:
-			if err := c.chartUpdater.UpdateAllChartSummaries(); err != nil {
-				utils.LogError("COORDINATOR", "Chart update failed: %v", err)
-			} else {
-				// Proactively warm cache after successful update (no invalidation!)
-				if err := c.chartService.RefreshCache(); err != nil {
-					utils.LogError("COORDINATOR", "Failed to warm cache after update: %v", err)
-				} else {
-					utils.LogDebug("COORDINATOR", "🔥 Chart summaries updated and cache warmed")
-					// Trigger broadcast only when cache is actually updated
-					c.chartBroadcaster.TriggerBroadcast()
-				}
-			}
-		}
-	}
-}
-
-// GetChartService returns the PostgreSQL chart service for API endpoints
-func (c *Coordinator) GetChartService() *database.PostgreSQLChartService {
-	return c.chartService
+// GetClickHouseService returns the ClickHouse service for analytics
+func (c *Coordinator) GetClickHouseService() *storage.ClickHouseService {
+	return c.clickhouseService
 }
 
 // GetBroadcaster returns the broadcaster for WebSocket client management
-func (c *Coordinator) GetBroadcaster() broadcaster.BroadcasterInterface {
+func (c *Coordinator) GetBroadcaster() transport.BroadcasterInterface {
 	return c.broadcaster
 }
 
-// GetScheduler returns the scheduler for stats endpoints
-func (c *Coordinator) GetScheduler() *scheduler.Scheduler {
-	return c.scheduler
+// GetChannels returns the channels for monitoring
+func (c *Coordinator) GetChannels() *core.Channels {
+	return c.channels
 }
 
-// GetSyncManager returns the sync manager for stats endpoints
-func (c *Coordinator) GetSyncManager() *fetcher.SyncManager {
-	return c.syncManager
-}
-
-// GetProcessor returns the processor for stats endpoints
-func (c *Coordinator) GetProcessor() *processor.Processor {
-	return c.processor
-}
-
-// GetDatabaseWriter returns the database writer for stats endpoints
-func (c *Coordinator) GetDatabaseWriter() *database.Writer {
-	return c.dbWriter
-}
-
-// GetPipelineStats returns comprehensive pipeline statistics
-func (c *Coordinator) GetPipelineStats() map[string]interface{} {
-	// Get database stats
-	dbStats, err := c.dbWriter.GetDatabaseStats()
-	if err != nil {
-		dbStats = map[string]interface{}{"error": err.Error()}
-	}
-	
+// GetStats returns comprehensive pipeline statistics
+func (c *Coordinator) GetStats() map[string]interface{} {
 	stats := map[string]interface{}{
 		"timestamp": time.Now(),
+		"architecture": map[string]interface{}{
+			"type":        "clean_modular_with_sync",
+			"components":  4,
+			"database":    "clickhouse",
+			"data_flow": []string{
+				"🔴 Forward Fetcher → Processor → {WebSocket + Database}",
+				"🔵 Backward Fetcher → Database (historical gaps)",
+			},
+		},
 		"components": map[string]interface{}{
 			"syncManager": c.syncManager.GetStatus(),
 			"processor":   c.processor.GetStats(),
-			"scheduler":   c.scheduler.GetStats(),
+			"batcher":     c.batcher.GetStats(),
 			"broadcaster": c.broadcaster.GetShardStats(),
-			"database":    dbStats,
 		},
-		"channels": map[string]interface{}{
-			"rawTransfers":       len(c.channels.RawTransfers),
-			"processedTransfers": len(c.channels.ProcessedTransfers), 
-			"transferBroadcasts": len(c.channels.TransferBroadcasts),
-			"databaseSaves":     len(c.channels.DatabaseSaves),
-			"chartUpdates":      len(c.channels.ChartUpdates),
-		},
-		"channelCapacities": map[string]interface{}{
-			"rawTransfers":       cap(c.channels.RawTransfers),
-			"processedTransfers": cap(c.channels.ProcessedTransfers),
-			"transferBroadcasts": cap(c.channels.TransferBroadcasts),
-			"databaseSaves":     cap(c.channels.DatabaseSaves),
-			"chartUpdates":      cap(c.channels.ChartUpdates),
-		},
-		"channelUtilization": map[string]interface{}{
-			"rawTransfers":       float64(len(c.channels.RawTransfers)) / float64(cap(c.channels.RawTransfers)) * 100,
-			"processedTransfers": float64(len(c.channels.ProcessedTransfers)) / float64(cap(c.channels.ProcessedTransfers)) * 100,
-			"transferBroadcasts": float64(len(c.channels.TransferBroadcasts)) / float64(cap(c.channels.TransferBroadcasts)) * 100,
-			"databaseSaves":     float64(len(c.channels.DatabaseSaves)) / float64(cap(c.channels.DatabaseSaves)) * 100,
-			"chartUpdates":      float64(len(c.channels.ChartUpdates)) / float64(cap(c.channels.ChartUpdates)) * 100,
-		},
-		"architecture": map[string]interface{}{
-			"mode":               "timestamp_based_scheduling",
-			"bidirectionalSync":  true,
-			"realisticTiming":    true,
-			"microSpacing":       true,
-			"chartUpdateInterval": "15s",
-			"chartBroadcastMode": "event_driven",
-			"dataFlow": []string{
-				"SyncManager → [RawTransfers] → Processor → [ProcessedTransfers] → Scheduler → [TransferBroadcasts] → Broadcaster",
-				"SyncManager → [DatabaseSaves] → Database Writer",
-				"Database → Chart Updater (15s) → Chart Cache Refresh → Event-Driven Broadcast → WebSocket",
-			},
-		},
+		"channels": c.channels.GetChannelStats(),
 	}
 	
 	return stats
 }
 
-// Stop gracefully shuts down the coordinator
+// Stop gracefully shuts down all components
 func (c *Coordinator) Stop() {
 	if c.cancel != nil {
-		utils.LogInfo("COORDINATOR", "Stopping enhanced pipeline coordinator with bidirectional sync")
-		
-		// Stop sync manager first
-		c.syncManager.Stop()
-		utils.LogInfo("COORDINATOR", "SyncManager stopped")
-		
-		// Stop chart broadcaster
-		c.chartBroadcaster.Stop()
-		utils.LogInfo("COORDINATOR", "Chart broadcaster stopped")
-		
-		// Cancel context to signal shutdown to all components
+		utils.LogInfo("COORDINATOR", "Stopping clean modular pipeline")
 		c.cancel()
 	}
 }
 
-// Wait waits for all threads to complete
+// Wait waits for all components to complete
 func (c *Coordinator) Wait() {
 	c.wg.Wait()
-	utils.LogInfo("COORDINATOR", "All pipeline threads stopped")
+	utils.LogInfo("COORDINATOR", "All components stopped")
+}
+
+// Health checks the health of all components
+func (c *Coordinator) Health(ctx context.Context) map[string]interface{} {
+	health := map[string]interface{}{
+		"timestamp": time.Now(),
+		"overall":   "healthy",
+	}
+	
+	// Check ClickHouse health
+	if err := c.clickhouseService.Health(ctx); err != nil {
+		health["clickhouse"] = "unhealthy: " + err.Error()
+		health["overall"] = "degraded"
+	} else {
+		health["clickhouse"] = "healthy"
+	}
+	
+	// Check component status
+	syncStatus := c.syncManager.GetStatus()
+	processorStats := c.processor.GetStats()
+	batcherStats := c.batcher.GetStats()
+	
+	health["components"] = map[string]interface{}{
+		"syncManager": fmt.Sprintf("forward: %v, backward: %v", syncStatus["forward_active"], syncStatus["backward_active"]),
+		"processor": map[bool]string{true: "running", false: "stopped"}[processorStats.IsRunning],
+		"batcher":   map[bool]string{true: "running", false: "stopped"}[batcherStats.IsRunning],
+		"broadcaster": "running", // Broadcaster doesn't expose IsRunning yet
+	}
+	
+	return health
+}
+
+// startChartUpdates handles periodic chart data broadcasts to WebSocket clients
+func (c *Coordinator) startChartUpdates(ctx context.Context) {
+	utils.LogInfo("COORDINATOR", "Starting chart data updates (1 minute intervals)")
+	
+	// Send initial chart data immediately
+	c.broadcastChartUpdate(ctx)
+	
+	// Set up periodic updates every 1 minute
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-ctx.Done():
+			utils.LogInfo("COORDINATOR", "Chart updates stopping")
+			return
+		case <-ticker.C:
+			c.broadcastChartUpdate(ctx)
+		}
+	}
+}
+
+// broadcastChartUpdate broadcasts chart data to all connected WebSocket clients
+func (c *Coordinator) broadcastChartUpdate(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			utils.LogError("COORDINATOR", "Chart update broadcast panic recovered: %v", r)
+		}
+	}()
+	
+	utils.LogInfo("COORDINATOR", "Starting chart data broadcast via ChartBroadcaster...")
+	
+	// Use ChartBroadcaster for comprehensive chart data including asset volumes
+	c.chartBroadcaster.BroadcastChartUpdate(ctx)
+	
+	utils.LogInfo("COORDINATOR", "Chart data broadcast completed via ChartBroadcaster")
 } 

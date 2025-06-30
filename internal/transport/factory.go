@@ -1,9 +1,10 @@
-package broadcaster
+package transport
 
 import (
 	"context"
 	"net/http"
-	"websocket-backend-new/internal/channels"
+	"websocket-backend/config"
+	"websocket-backend/internal/core"
 )
 
 // BroadcasterInterface defines the common interface for all broadcaster implementations
@@ -20,55 +21,66 @@ type BroadcasterInterface interface {
 
 
 // CreateBroadcaster creates a sharded broadcaster with enhanced management
-func CreateBroadcaster(config Config, channels *channels.Channels) BroadcasterInterface {
+func CreateBroadcaster(cfg config.BroadcasterConfig, channels *core.Channels) BroadcasterInterface {
 	// Always create sharded broadcaster
-	return NewBroadcaster(config, channels)
+	return NewBroadcaster(cfg, channels)
+}
+
+// getDefaultBroadcasterConfig returns default broadcaster configuration
+func getDefaultBroadcasterConfig() config.BroadcasterConfig {
+	return config.BroadcasterConfig{
+		MaxClients:      1000,
+		BufferSize:      100,
+		DropSlowClients: true,
+		NumShards:       4,
+		WorkersPerShard: 4,
+	}
 }
 
 // GetRecommendedConfig returns optimized config based on expected load
-func GetRecommendedConfig(expectedClients int) Config {
-	config := DefaultConfig()
+func GetRecommendedConfig(expectedClients int) config.BroadcasterConfig {
+	cfg := getDefaultBroadcasterConfig()
 	
 	// Enhanced configuration recommendations based on load testing and production experience
 	if expectedClients > 15000 {
 		// Very high load: aggressive sharding with larger buffers
-		config.NumShards = calculateOptimalShards(expectedClients)
-		config.WorkersPerShard = 8    // More workers for very high load
-		config.MaxClients = 2500      // Higher capacity per shard
-		config.BufferSize = 256       // Larger buffers to handle bursts
+		cfg.NumShards = calculateOptimalShards(expectedClients)
+		cfg.WorkersPerShard = 8    // More workers for very high load
+		cfg.MaxClients = 2500      // Higher capacity per shard
+		cfg.BufferSize = 256       // Larger buffers to handle bursts
 	} else if expectedClients > 8000 {
 		// High load: optimized sharding
-		config.NumShards = calculateOptimalShards(expectedClients)
-		config.WorkersPerShard = 6    // Increased workers for better parallelism
-		config.MaxClients = 2000      // Increased per-shard capacity
-		config.BufferSize = 200       // Larger buffers for better throughput
+		cfg.NumShards = calculateOptimalShards(expectedClients)
+		cfg.WorkersPerShard = 6    // Increased workers for better parallelism
+		cfg.MaxClients = 2000      // Increased per-shard capacity
+		cfg.BufferSize = 200       // Larger buffers for better throughput
 	} else if expectedClients > 3000 {
 		// Medium-high load: balanced sharding
-		config.NumShards = calculateOptimalShards(expectedClients)
-		config.WorkersPerShard = 4    // Standard workers
-		config.MaxClients = 1500      // Moderate per-shard capacity
-		config.BufferSize = 150       // Enhanced buffers
+		cfg.NumShards = calculateOptimalShards(expectedClients)
+		cfg.WorkersPerShard = 4    // Standard workers
+		cfg.MaxClients = 1500      // Moderate per-shard capacity
+		cfg.BufferSize = 150       // Enhanced buffers
 	} else if expectedClients > 1000 {
 		// Medium load: light sharding for better performance
-		config.NumShards = 2          // Minimal sharding
-		config.WorkersPerShard = 4
-		config.MaxClients = 1500
-		config.BufferSize = 128       // Slightly larger buffers
+		cfg.NumShards = 2          // Minimal sharding
+		cfg.WorkersPerShard = 4
+		cfg.MaxClients = 1500
+		cfg.BufferSize = 128       // Slightly larger buffers
 	} else if expectedClients > 500 {
 		// Low-medium load: enhanced standard sharding
-		config.NumShards = 2          // Light sharding
-		config.MaxClients = 1200      // Increased capacity
-		config.BufferSize = 128       // Enhanced buffer size
+		cfg.NumShards = 2          // Light sharding
+		cfg.MaxClients = 1200      // Increased capacity
+		cfg.BufferSize = 128       // Enhanced buffer size
 	} else {
 		// Low load: minimal sharding
-		config.NumShards = 1          // Single shard for very low load
-		config.MaxClients = 800       // Reasonable capacity
-		config.BufferSize = 100       // Standard buffer size
+		cfg.NumShards = 1          // Single shard for very low load
+		cfg.MaxClients = 800       // Reasonable capacity
+		cfg.BufferSize = 100       // Standard buffer size
 	}
 	
-	config.DropSlowClients = true // Always drop slow clients in production
+	cfg.DropSlowClients = true // Always drop slow clients in production
 	
-	return config
+	return cfg
 }
 
 // calculateOptimalShards calculates the optimal number of shards for given client count
@@ -87,10 +99,10 @@ func calculateOptimalShards(expectedClients int) int {
 }
 
 // GetOptimizedConfig returns environment-specific configurations
-func GetOptimizedConfig(scenario string) Config {
+func GetOptimizedConfig(scenario string) config.BroadcasterConfig {
 	switch scenario {
 	case "development":
-		return Config{
+		return config.BroadcasterConfig{
 			MaxClients:      200,
 			BufferSize:      64,
 			DropSlowClients: false, // More forgiving in dev
@@ -99,7 +111,7 @@ func GetOptimizedConfig(scenario string) Config {
 		}
 		
 	case "testing":
-		return Config{
+		return config.BroadcasterConfig{
 			MaxClients:      1000,
 			BufferSize:      100,
 			DropSlowClients: true,
@@ -108,7 +120,7 @@ func GetOptimizedConfig(scenario string) Config {
 		}
 		
 	case "staging":
-		return Config{
+		return config.BroadcasterConfig{
 			MaxClients:      1500,
 			BufferSize:      150,
 			DropSlowClients: true,
@@ -117,7 +129,7 @@ func GetOptimizedConfig(scenario string) Config {
 		}
 		
 	case "production":
-		return Config{
+		return config.BroadcasterConfig{
 			MaxClients:      2000,
 			BufferSize:      200,
 			DropSlowClients: true,
@@ -126,7 +138,7 @@ func GetOptimizedConfig(scenario string) Config {
 		}
 		
 	case "high-load":
-		return Config{
+		return config.BroadcasterConfig{
 			MaxClients:      2500,
 			BufferSize:      256,
 			DropSlowClients: true,
@@ -136,16 +148,16 @@ func GetOptimizedConfig(scenario string) Config {
 		
 	default:
 		// Return enhanced default config
-		config := DefaultConfig()
-		config.BufferSize = 128 // Enhanced default buffer
-		config.NumShards = 4
-		config.WorkersPerShard = 4
-		return config
+		cfg := getDefaultBroadcasterConfig()
+		cfg.BufferSize = 128 // Enhanced default buffer
+		cfg.NumShards = 4
+		cfg.WorkersPerShard = 4
+		return cfg
 	}
 }
 
 // GetConfigForEnvironment returns environment-specific optimized configuration
-func GetConfigForEnvironment(env string, expectedClients int) Config {
+func GetConfigForEnvironment(env string, expectedClients int) config.BroadcasterConfig {
 	baseConfig := GetRecommendedConfig(expectedClients)
 	
 	switch env {

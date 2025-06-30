@@ -3,69 +3,67 @@ package fetcher
 import (
 	"context"
 	"time"
-	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/utils"
+	"websocket-backend/config"
+	"websocket-backend/internal/core"
+	"websocket-backend/internal/utils"
 )
+
+// ChainProvider interface defines what the sync manager needs for chain data
+type ChainProvider interface {
+	GetChains() ([]interface{}, error)
+}
 
 // SyncManager coordinates both forward and backward fetchers for complete sync coverage
 type SyncManager struct {
-	config           Config
-	channels         *channels.Channels
-	chainProvider    ChainProvider
-	dbWriter         DatabaseWriter
-	forwardFetcher   *Fetcher
-	backwardFetcher  *BackwardFetcher
+	fetcherConfig        config.FetcherConfig
+	backwardFetcherConfig config.BackwardFetcherConfig
+	channels             *core.Channels
+	chainProvider        ChainProvider
+	dbWriter             DatabaseWriter
+	forwardFetcher       *Fetcher
+	backwardFetcher      *BackwardFetcher
 	
 	// Configuration
-	enableBackwardSync bool
-	backwardSyncDepth  int  // Days to sync backwards
-	gapThreshold       time.Duration // If gap > threshold, start backward sync
+	gapThreshold time.Duration // If gap > threshold, start backward sync
 }
 
 // NewSyncManager creates a new sync manager
-func NewSyncManager(config Config, channels *channels.Channels, chainProvider ChainProvider, dbWriter DatabaseWriter) *SyncManager {
+func NewSyncManager(fetcherCfg config.FetcherConfig, backwardFetcherCfg config.BackwardFetcherConfig, channels *core.Channels, chainProvider ChainProvider, dbWriter DatabaseWriter) *SyncManager {
 	return &SyncManager{
-		config:             config,
-		channels:           channels,
-		chainProvider:      chainProvider,
-		dbWriter:           dbWriter,
-		enableBackwardSync: true,
-		backwardSyncDepth:  7,                // Default: sync back 7 days
-		gapThreshold:       6 * time.Hour,    // If oldest transfer > 6h old, start backward sync
+		fetcherConfig:         fetcherCfg,
+		backwardFetcherConfig: backwardFetcherCfg,
+		channels:              channels,
+		chainProvider:         chainProvider,
+		dbWriter:              dbWriter,
+		gapThreshold:          6 * time.Hour, // If oldest transfer > 6h old, start backward sync
 	}
 }
 
-// SetBackwardSyncConfig configures backward sync behavior
-func (sm *SyncManager) SetBackwardSyncConfig(enabled bool, depthDays int, gapThreshold time.Duration) {
-	sm.enableBackwardSync = enabled
-	sm.backwardSyncDepth = depthDays
-	sm.gapThreshold = gapThreshold
+// SetGapThreshold configures the gap detection threshold
+func (sm *SyncManager) SetGapThreshold(threshold time.Duration) {
+	sm.gapThreshold = threshold
 }
 
 // Start begins coordinated sync operation
 func (sm *SyncManager) Start(ctx context.Context) {
 	utils.LogInfo("SYNC_MANAGER", "Starting coordinated sync system")
+	utils.LogInfo("SYNC_MANAGER", "🔍 DEBUG: Backward fetcher config - Enabled: %v, MaxDepthDays: %d", sm.backwardFetcherConfig.Enabled, sm.backwardFetcherConfig.MaxDepthDays)
 	
 	// Initialize forward fetcher
-	forwardFetcher, err := NewFetcher(sm.config, sm.channels, sm.chainProvider)
-	if err != nil {
-		utils.LogError("SYNC_MANAGER", "Failed to create forward fetcher: %v", err)
-		return
-	}
-	forwardFetcher.SetDatabaseWriter(sm.dbWriter)
+	forwardFetcher := NewFetcher(sm.fetcherConfig, sm.channels, sm.dbWriter)
 	sm.forwardFetcher = forwardFetcher
 	
 	// Check if we need backward sync
 	needsBackwardSync, reason := sm.shouldStartBackwardSync()
+	utils.LogInfo("SYNC_MANAGER", "🔍 DEBUG: shouldStartBackwardSync() = %v, reason: %s", needsBackwardSync, reason)
 	
-	if needsBackwardSync && sm.enableBackwardSync {
+	if needsBackwardSync && sm.backwardFetcherConfig.Enabled {
 		utils.LogInfo("SYNC_MANAGER", "🚀 STARTING BIDIRECTIONAL SYNC: %s", reason)
 		utils.LogInfo("SYNC_MANAGER", "   🔴 Forward fetcher: NEW transfers → store + broadcast")
-		utils.LogInfo("SYNC_MANAGER", "   🔵 Backward fetcher: HISTORICAL transfers → store only")
+		utils.LogInfo("SYNC_MANAGER", "   🔵 Backward fetcher: HISTORICAL transfers (max %d days) → store only", sm.backwardFetcherConfig.MaxDepthDays)
 		
-		// Initialize backward fetcher
-		sm.backwardFetcher = NewBackwardFetcher(sm.config, sm.channels, sm.dbWriter)
-		sm.backwardFetcher.SetMaxDepth(sm.backwardSyncDepth)
+		// Initialize backward fetcher with its own config
+		sm.backwardFetcher = NewBackwardFetcher(sm.backwardFetcherConfig, sm.channels, sm.dbWriter)
 		
 		// Start both fetchers concurrently
 		go sm.forwardFetcher.Start(ctx)
@@ -73,8 +71,8 @@ func (sm *SyncManager) Start(ctx context.Context) {
 		
 		utils.LogInfo("SYNC_MANAGER", "✅ Both forward and backward sync started")
 	} else {
-		if !sm.enableBackwardSync {
-			utils.LogInfo("SYNC_MANAGER", "🚀 FORWARD SYNC ONLY: Backward sync disabled")
+		if !sm.backwardFetcherConfig.Enabled {
+			utils.LogInfo("SYNC_MANAGER", "🚀 FORWARD SYNC ONLY: Backward sync disabled in configuration")
 		} else {
 			utils.LogInfo("SYNC_MANAGER", "🚀 FORWARD SYNC ONLY: %s", reason)
 		}
@@ -94,20 +92,28 @@ func (sm *SyncManager) shouldStartBackwardSync() (bool, string) {
 	// Check if database has any transfers
 	count, err := sm.dbWriter.GetTransferCount()
 	if err != nil {
+		utils.LogError("SYNC_MANAGER", "🔍 DEBUG: Failed to get transfer count: %v", err)
 		return false, "failed to check database state"
 	}
 	
+	utils.LogInfo("SYNC_MANAGER", "🔍 DEBUG: Database has %d transfers", count)
+	
 	if count == 0 {
+		utils.LogInfo("SYNC_MANAGER", "🔍 DEBUG: Database is empty - no backward sync needed")
 		return false, "database is empty - no backward sync needed"
 	}
 	
 	// Get earliest transfer timestamp to check for gaps
 	earliestSortOrder, err := sm.dbWriter.GetEarliestSortOrder()
 	if err != nil {
+		utils.LogError("SYNC_MANAGER", "🔍 DEBUG: Failed to get earliest sort order: %v", err)
 		return false, "failed to get earliest sort order"
 	}
 	
+	utils.LogInfo("SYNC_MANAGER", "🔍 DEBUG: Earliest sort order: %s", earliestSortOrder)
+	
 	if earliestSortOrder == "" {
+		utils.LogWarn("SYNC_MANAGER", "🔍 DEBUG: No sort order available")
 		return false, "no sort order available"
 	}
 	
@@ -119,6 +125,7 @@ func (sm *SyncManager) shouldStartBackwardSync() (bool, string) {
 	
 	// For now, always start backward sync if enabled and we have existing transfers
 	// This ensures we fill any historical gaps
+	utils.LogInfo("SYNC_MANAGER", "🔍 DEBUG: Conditions met - will start backward sync to fill gaps")
 	return true, "has existing transfers - filling historical gaps"
 }
 
@@ -176,12 +183,19 @@ func (sm *SyncManager) GetStatus() map[string]interface{} {
 	count, _ := sm.dbWriter.GetTransferCount()
 	
 	status := map[string]interface{}{
-		"total_transfers":    count,
-		"forward_active":     true, // Always active
-		"backward_active":    sm.backwardFetcher != nil && sm.backwardFetcher.IsRunning(),
-		"backward_enabled":   sm.enableBackwardSync,
-		"sync_depth_days":    sm.backwardSyncDepth,
-		"gap_threshold_hours": sm.gapThreshold.Hours(),
+		"total_transfers":         count,
+		"forward_active":          true, // Always active
+		"backward_active":         sm.backwardFetcher != nil && sm.backwardFetcher.IsRunning(),
+		"backward_enabled":        sm.backwardFetcherConfig.Enabled,
+		"backward_max_depth_days": sm.backwardFetcherConfig.MaxDepthDays,
+		"gap_threshold_hours":     sm.gapThreshold.Hours(),
+		"backward_config": map[string]interface{}{
+			"batch_size":              sm.backwardFetcherConfig.BatchSize,
+			"http_timeout_seconds":    sm.backwardFetcherConfig.HTTPTimeout.Seconds(),
+			"retry_delay_ms":          sm.backwardFetcherConfig.RetryDelay.Milliseconds(),
+			"rate_limit_delay_ms":     sm.backwardFetcherConfig.RateLimitDelay.Milliseconds(),
+			"backpressure_timeout_ms": sm.backwardFetcherConfig.BackpressureTimeoutMs,
+		},
 	}
 	
 	return status

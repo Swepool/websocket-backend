@@ -1,4 +1,4 @@
-package database
+package storage
 
 import (
 	"database/sql"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"time"
-	"websocket-backend-new/internal/utils"
+	"websocket-backend/internal/utils"
 )
 
 // ChartUpdater handles background computation of chart summaries
@@ -21,14 +21,14 @@ func NewChartUpdater(db *sql.DB) *ChartUpdater {
 
 // UpdateAllChartSummaries computes and stores all chart summaries
 func (u *ChartUpdater) UpdateAllChartSummaries() error {
-	timeScales := []string{"1m", "1h", "1d", "7d", "14d", "30d"}
+	timeScales := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
 	now := time.Now()
 	
 	for _, timeScale := range timeScales {
 		var since time.Time
 		switch timeScale {
-		case "1m":
-			since = now.Add(-time.Minute)
+		case "5m":
+			since = now.Add(-5 * time.Minute)
 		case "1h":
 			since = now.Add(-time.Hour)
 		case "1d":
@@ -192,7 +192,7 @@ func (u *ChartUpdater) updateChainFlows(timeScale string, since time.Time) error
 		GROUP BY dest_chain, dest_name`
 	
 	// Build chain flows map
-	chainFlows := make(map[string]*FrontendChainFlow)
+	chainFlows := make(map[string]*FrontendChainData)
 	
 	// Process outgoing
 	rows, err := u.db.Query(outgoingQuery, since.Unix())
@@ -203,7 +203,7 @@ func (u *ChartUpdater) updateChainFlows(timeScale string, since time.Time) error
 			var count int64
 			if err := rows.Scan(&chainID, &chainName, &count); err == nil {
 				if chainFlows[chainID] == nil {
-					chainFlows[chainID] = &FrontendChainFlow{
+					chainFlows[chainID] = &FrontendChainData{
 						UniversalChainID: chainID,
 						ChainName:        chainName,
 						LastActivity:     time.Now().Format(time.RFC3339),
@@ -223,7 +223,7 @@ func (u *ChartUpdater) updateChainFlows(timeScale string, since time.Time) error
 			var count int64
 			if err := rows.Scan(&chainID, &chainName, &count); err == nil {
 				if chainFlows[chainID] == nil {
-					chainFlows[chainID] = &FrontendChainFlow{
+					chainFlows[chainID] = &FrontendChainData{
 						UniversalChainID: chainID,
 						ChainName:        chainName,
 						LastActivity:     time.Now().Format(time.RFC3339),
@@ -235,7 +235,7 @@ func (u *ChartUpdater) updateChainFlows(timeScale string, since time.Time) error
 	}
 	
 	// Calculate net flows and add asset data for each chain
-	var flows []FrontendChainFlow
+	var flows []FrontendChainData
 	for chainID, flow := range chainFlows {
 		flow.NetFlow = flow.OutgoingCount - flow.IncomingCount
 		

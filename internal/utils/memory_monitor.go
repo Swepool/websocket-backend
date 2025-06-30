@@ -41,7 +41,6 @@ type MemoryMonitor struct {
 	currentPressure   int32
 	lastCheckTime     int64 // Unix timestamp
 	forceGCRequests   int64
-	cleanupTriggers   int64
 	
 	// Memory thresholds (in bytes)
 	lowPressureThreshold      uint64 // 256MB
@@ -51,8 +50,6 @@ type MemoryMonitor struct {
 	
 	// Cleanup configuration
 	aggressiveCleanupEnabled bool
-	lastCleanupTime          int64
-	minCleanupInterval       time.Duration
 }
 
 // MemoryStats holds memory statistics
@@ -76,7 +73,6 @@ func NewMemoryMonitor() *MemoryMonitor {
 		highPressureThreshold:     1024 * 1024 * 1024, // 1GB
 		criticalPressureThreshold: 2048 * 1024 * 1024, // 2GB
 		aggressiveCleanupEnabled:  true,
-		minCleanupInterval:        30 * time.Second,
 	}
 }
 
@@ -149,31 +145,7 @@ func (mm *MemoryMonitor) getPressureReason(heapAlloc uint64) string {
 	}
 }
 
-// ShouldTriggerCleanup returns true if cleanup should be triggered based on memory pressure
-func (mm *MemoryMonitor) ShouldTriggerCleanup() bool {
-	pressure := mm.GetCurrentPressure()
-	
-	if pressure <= MemoryPressureLow {
-		return false
-	}
-	
-	// Check minimum interval between cleanups
-	lastCleanup := atomic.LoadInt64(&mm.lastCleanupTime)
-	if lastCleanup > 0 {
-		elapsed := time.Since(time.Unix(lastCleanup, 0))
-		if elapsed < mm.minCleanupInterval {
-			return false
-		}
-	}
-	
-	return true
-}
 
-// TriggerCleanup records that a cleanup was triggered
-func (mm *MemoryMonitor) TriggerCleanup() {
-	atomic.StoreInt64(&mm.lastCleanupTime, time.Now().Unix())
-	atomic.AddInt64(&mm.cleanupTriggers, 1)
-}
 
 // ShouldForceGC returns true if garbage collection should be forced
 func (mm *MemoryMonitor) ShouldForceGC() bool {
@@ -205,43 +177,7 @@ func (mm *MemoryMonitor) GetCleanupAggression() float64 {
 	}
 }
 
-// GetRetentionMultiplier returns a multiplier for retention periods based on memory pressure
-func (mm *MemoryMonitor) GetRetentionMultiplier() float64 {
-	pressure := mm.GetCurrentPressure()
-	
-	switch pressure {
-	case MemoryPressureCritical:
-		return 0.25 // Keep only 25% of normal retention
-	case MemoryPressureHigh:
-		return 0.5 // Keep 50% of normal retention
-	case MemoryPressureMedium:
-		return 0.75 // Keep 75% of normal retention
-	default:
-		return 1.0 // Normal retention
-	}
-}
 
-// OptimizeMemoryUsage performs memory optimization based on current pressure
-func (mm *MemoryMonitor) OptimizeMemoryUsage() {
-	pressure := mm.CheckMemoryPressure()
-	
-	switch pressure {
-	case MemoryPressureCritical:
-		// Immediate and aggressive action
-		mm.ForceGC()
-		runtime.GC() // Double GC for critical situations
-		
-	case MemoryPressureHigh:
-		// Force GC
-		mm.ForceGC()
-		
-	case MemoryPressureMedium:
-		// Suggest GC but don't force
-		if mm.ShouldForceGC() {
-			mm.ForceGC()
-		}
-	}
-}
 
 // GetStats returns memory monitor statistics
 func (mm *MemoryMonitor) GetStats() map[string]interface{} {
@@ -257,9 +193,7 @@ func (mm *MemoryMonitor) GetStats() map[string]interface{} {
 		"gc_cycles":              stats.GCCycles,
 		"last_gc":                stats.LastGC.Format(time.RFC3339),
 		"force_gc_requests":      atomic.LoadInt64(&mm.forceGCRequests),
-		"cleanup_triggers":       atomic.LoadInt64(&mm.cleanupTriggers),
 		"cleanup_aggression":     mm.GetCleanupAggression(),
-		"retention_multiplier":   mm.GetRetentionMultiplier(),
 	}
 }
 
@@ -279,22 +213,6 @@ func CheckMemoryPressure() MemoryPressure {
 	return GetGlobalMemoryMonitor().CheckMemoryPressure()
 }
 
-func ShouldTriggerCleanup() bool {
-	return GetGlobalMemoryMonitor().ShouldTriggerCleanup()
-}
-
-func TriggerCleanup() {
-	GetGlobalMemoryMonitor().TriggerCleanup()
-}
-
-func OptimizeMemoryUsage() {
-	GetGlobalMemoryMonitor().OptimizeMemoryUsage()
-}
-
 func GetMemoryStats() MemoryStats {
 	return GetGlobalMemoryMonitor().GetCurrentMemoryStats()
-}
-
-func GetRetentionMultiplier() float64 {
-	return GetGlobalMemoryMonitor().GetRetentionMultiplier()
 } 

@@ -5,43 +5,88 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"time"
-	"websocket-backend-new/internal/channels"
-	"websocket-backend-new/internal/utils"
-	"websocket-backend-new/models"
+	"websocket-backend/config"
+	"websocket-backend/internal/core"
+	"websocket-backend/internal/utils"
+	"websocket-backend/models"
 )
+
+// DatabaseWriter interface defines what the fetcher needs from the database
+type DatabaseWriter interface {
+	InsertTransfers(ctx context.Context, transfers []models.Transfer) error
+	GetEarliestSortOrder() (string, error)
+	GetLatestSortOrder() (string, error)
+	GetTransferCount() (int64, error)
+}
+
+// transfersGraphQLResponse represents the GraphQL response structure
+type transfersGraphQLResponse struct {
+	Data struct {
+		V2Transfers []struct {
+			SourceChain struct {
+				UniversalChainID string `json:"universal_chain_id"`
+				ChainID          string `json:"chain_id"`
+				DisplayName      string `json:"display_name"`
+				Testnet          bool   `json:"testnet"`
+				RpcType          string `json:"rpc_type"`
+				AddrPrefix       string `json:"addr_prefix"`
+			} `json:"source_chain"`
+			DestinationChain struct {
+				UniversalChainID string `json:"universal_chain_id"`
+				ChainID          string `json:"chain_id"`
+				DisplayName      string `json:"display_name"`
+				Testnet          bool   `json:"testnet"`
+				RpcType          string `json:"rpc_type"`
+				AddrPrefix       string `json:"addr_prefix"`
+			} `json:"destination_chain"`
+			SenderCanonical         string    `json:"sender_canonical"`
+			SenderDisplay           string    `json:"sender_display"`
+			ReceiverCanonical       string    `json:"receiver_canonical"`
+			ReceiverDisplay         string    `json:"receiver_display"`
+			TransferSendTimestamp   time.Time `json:"transfer_send_timestamp"`
+			BaseToken               string    `json:"base_token"`
+			BaseAmount              string    `json:"base_amount"`
+			BaseTokenSymbol         string    `json:"base_token_symbol"`
+			BaseTokenDecimals       int       `json:"base_token_decimals"`
+			SortOrder               string    `json:"sort_order"`
+			PacketHash              string    `json:"packet_hash"`
+		} `json:"v2_transfers"`
+	} `json:"data"`
+	Errors []interface{} `json:"errors"`
+}
 
 // BackwardFetcher handles fetching historical transfers going backwards in time
 type BackwardFetcher struct {
-	config          Config
-	channels        *channels.Channels
-	httpClient      *http.Client
+	config            config.BackwardFetcherConfig
+	channels          *core.Channels
+	httpClient        *http.Client
 	earliestSortOrder string
-	dbWriter        DatabaseWriter
-	isRunning       bool
-	maxDepthDays    int // Maximum number of days to sync backwards
+	dbWriter          DatabaseWriter
+	isRunning         bool
 }
 
 // NewBackwardFetcher creates a new backward fetcher
-func NewBackwardFetcher(config Config, channels *channels.Channels, dbWriter DatabaseWriter) *BackwardFetcher {
+func NewBackwardFetcher(cfg config.BackwardFetcherConfig, channels *core.Channels, dbWriter DatabaseWriter) *BackwardFetcher {
 	return &BackwardFetcher{
-		config:          config,
-		channels:        channels,
-		httpClient:      &http.Client{Timeout: 30 * time.Second},
-		dbWriter:        dbWriter,
-		maxDepthDays:    30, // Default: sync back 30 days maximum
+		config:     cfg,
+		channels:   channels,
+		httpClient: &http.Client{Timeout: cfg.HTTPTimeout},
+		dbWriter:   dbWriter,
 	}
-}
-
-// SetMaxDepth sets the maximum number of days to sync backwards
-func (bf *BackwardFetcher) SetMaxDepth(days int) {
-	bf.maxDepthDays = days
 }
 
 // Start begins backward syncing from the earliest transfer in database
 func (bf *BackwardFetcher) Start(ctx context.Context) {
-	utils.LogInfo("BACKWARD_FETCHER", "Starting backward sync")
+	// Check if backward sync is enabled
+	if !bf.config.Enabled {
+		utils.LogInfo("BACKWARD_FETCHER", "Backward sync is disabled in configuration")
+		return
+	}
+	
+	utils.LogInfo("BACKWARD_FETCHER", "Starting backward sync (max depth: %d days)", bf.config.MaxDepthDays)
 	
 	// Get the earliest sort order from database
 	if err := bf.initializeEarliestSortOrder(); err != nil {
@@ -60,7 +105,7 @@ func (bf *BackwardFetcher) Start(ctx context.Context) {
 	utils.LogInfo("BACKWARD_FETCHER", "Starting backward sync from sort order: %s", bf.earliestSortOrder)
 	
 	// Calculate cutoff time for maximum depth
-	cutoffTime := time.Now().AddDate(0, 0, -bf.maxDepthDays)
+	cutoffTime := time.Now().AddDate(0, 0, -bf.config.MaxDepthDays)
 	
 	batchCount := 0
 	totalFetched := 0
@@ -75,7 +120,7 @@ func (bf *BackwardFetcher) Start(ctx context.Context) {
 			transfers, err := bf.fetchBackwardBatch()
 			if err != nil {
 				utils.LogError("BACKWARD_FETCHER", "Failed to fetch backward batch: %v", err)
-				time.Sleep(1 * time.Second) // Faster retry for backward sync
+				time.Sleep(bf.config.RetryDelay) // Configured retry delay
 				continue
 			}
 			
@@ -87,14 +132,14 @@ func (bf *BackwardFetcher) Start(ctx context.Context) {
 			// Check if we've reached our depth limit
 			oldestTransfer := transfers[len(transfers)-1]
 			if oldestTransfer.TransferSendTimestamp.Before(cutoffTime) {
-				utils.LogInfo("BACKWARD_FETCHER", "Reached maximum depth (%d days) - stopping backward sync", bf.maxDepthDays)
+				utils.LogInfo("BACKWARD_FETCHER", "Reached maximum depth (%d days) - stopping backward sync", bf.config.MaxDepthDays)
 				return
 			}
 			
 			// Store transfers in database (no broadcasting)
 			backpressureConfig := utils.DefaultBackpressureConfig()
 			backpressureConfig.DropOnOverflow = false
-			backpressureConfig.TimeoutMs = 1000 // Longer timeout for historical data
+			backpressureConfig.TimeoutMs = bf.config.BackpressureTimeoutMs // Configured timeout for historical data
 			
 			if utils.SendWithBackpressure(bf.channels.DatabaseSaves, transfers, backpressureConfig, nil) {
 				batchCount++
@@ -103,15 +148,15 @@ func (bf *BackwardFetcher) Start(ctx context.Context) {
 					batchCount, len(transfers), totalFetched)
 			} else {
 				utils.LogError("BACKWARD_FETCHER", "❌ BACKWARD: Failed to store batch %d (%d historical transfers)", batchCount+1, len(transfers))
-				time.Sleep(500 * time.Millisecond) // Faster retry for database saves
+				time.Sleep(bf.config.DatabaseRetryDelay) // Configured database retry delay
 				continue
 			}
 			
 			// Update earliest sort order for next iteration
 			bf.earliestSortOrder = transfers[len(transfers)-1].SortOrder
 			
-			// Balanced delay for faster backward sync (respecting GraphQL limits)
-			time.Sleep(100 * time.Millisecond)
+			// Rate limiting delay (respecting GraphQL limits)
+			time.Sleep(bf.config.RateLimitDelay)
 		}
 	}
 }
@@ -257,12 +302,36 @@ func (bf *BackwardFetcher) fetchBackwardBatch() ([]models.Transfer, error) {
 }
 
 // Helper function to share token amount formatting logic
+// Uses big.Rat for precise decimal arithmetic, preserves FULL precision (no truncation)
 func formatTokenAmount(baseAmount string, decimals int) string {
 	if baseAmount == "" || baseAmount == "0" {
 		return "0"
 	}
 	
-	// For backward fetcher, we'll use simplified formatting
-	// In production, you might want to extract the full implementation from fetcher.go
-	return baseAmount
+	// Parse the base amount as a big integer
+	baseAmountBig := new(big.Int)
+	_, ok := baseAmountBig.SetString(baseAmount, 10)
+	if !ok {
+		utils.LogWarn("BACKWARD_FETCHER", "Failed to parse amount '%s', using original", baseAmount)
+		return baseAmount
+	}
+	
+	// If no decimals, return as string
+	if decimals <= 0 {
+		return baseAmountBig.String()
+	}
+	
+	// Create divisor as 10^decimals using big.Int
+	divisor := new(big.Int)
+	divisor.Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	
+	// Use big.Rat for exact decimal division
+	rat := new(big.Rat)
+	rat.SetFrac(baseAmountBig, divisor)
+	
+	// Convert to decimal string with FULL precision (no truncation)
+	// Send complete precision to frontend, let it decide how to display
+	formatted := rat.FloatString(decimals)
+	
+	return formatted
 } 

@@ -106,9 +106,9 @@ func PrintOptimizationStatus() {
 	BroadcasterLogger.Info("✓ Optimized JSON marshaling")
 	
 	// Database optimization status
-	BroadcasterLogger.Info("✓ Database optimized with PostgreSQL")
-	BroadcasterLogger.Info("✓ Database-driven chart computation")
-	BroadcasterLogger.Info("✓ Simplified in-memory data structures")
+	BroadcasterLogger.Info("✓ Database optimized with ClickHouse")
+	BroadcasterLogger.Info("✓ High-performance analytics with ClickHouse")
+	BroadcasterLogger.Info("✓ Real-time data compression and aggregation")
 	
 	// Logging optimization status
 	BroadcasterLogger.Info("✓ Implemented structured logging with levels")
@@ -123,51 +123,4 @@ func PrintOptimizationStatus() {
 	BroadcasterLogger.Info("=== All optimizations are active ===")
 }
 
-// ValidateOptimizations checks that all optimizations are working correctly
-func ValidateOptimizations() bool {
-	allValid := true
-	
-	// Test memory monitor
-	pressure := CheckMemoryPressure()
-	if pressure < 0 {
-		Error("Memory monitor validation failed")
-		allValid = false
-	}
-	
-	// Test batch logger
-	batchLogger := GetBatchLogger()
-	if batchLogger == nil {
-		Error("Batch logger validation failed")
-		allValid = false
-	}
-	
-	// Test JSON pools
-	transferData := GetTransferDataMap()
-	if transferData == nil {
-		Error("JSON pool validation failed")
-		allValid = false
-	}
-	PutTransferDataMap(transferData)
-	
-	if allValid {
-		Info("✓ All optimizations validated successfully")
-	} else {
-		Error("✗ Some optimizations failed validation")
-	}
-	
-	return allValid
-}
-
-// GetOptimizationSummary returns a summary of all optimization metrics
-func GetOptimizationSummary() map[string]interface{} {
-	return map[string]interface{}{
-		"memory":     GetMemoryStats(),
-		"batch_logger": GetBatchLogger().GetStats(),
-		"runtime": map[string]interface{}{
-			"gomaxprocs": runtime.GOMAXPROCS(0),
-			"numcpu":     runtime.NumCPU(),
-			"goversion":  runtime.Version(),
-		},
-		"validation": ValidateOptimizations(),
-	}
-} 
+ 

@@ -41,7 +41,6 @@ type NodeHealthSummary struct {
 	AvgResponseTime  float64                    `json:"avgResponseTime"`
 	NodesWithRpcs    []NodeHealthData           `json:"nodesWithRpcs"`
 	ChainHealthStats map[string]ChainHealthStat `json:"chainHealthStats"`
-	DataAvailability NodeHealthAvailability     `json:"dataAvailability"`
 }
 
 // ChainHealthStat represents health statistics for a specific chain
@@ -53,12 +52,4 @@ type ChainHealthStat struct {
 	Uptime          float64 `json:"uptime"`
 }
 
-// NodeHealthAvailability represents data availability for different timeframes
-type NodeHealthAvailability struct {
-	HasMinute bool `json:"hasMinute"`
-	HasHour   bool `json:"hasHour"`
-	HasDay    bool `json:"hasDay"`
-	Has7Days  bool `json:"has7Days"`
-	Has14Days bool `json:"has14Days"`
-	Has30Days bool `json:"has30Days"`
-} 
+ 
