@@ -13,7 +13,21 @@ docker-compose -f docker-compose.clickhouse.yml up -d
 
 # Wait for ClickHouse to be ready
 echo "⏳ Waiting for ClickHouse to be ready..."
-sleep 5
+for i in {1..30}; do
+    if docker exec websocket-backend-clickhouse clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+        echo "✅ ClickHouse is ready!"
+        break
+    fi
+    echo "   Attempt $i/30: ClickHouse not ready yet..."
+    sleep 2
+done
+
+# Check if ClickHouse is actually ready
+if ! docker exec websocket-backend-clickhouse clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+    echo "❌ ClickHouse failed to start properly. Check logs:"
+    echo "   docker-compose -f docker-compose.clickhouse.yml logs clickhouse"
+    exit 1
+fi
 
 # Apply schema (includes database creation and user setup)
 echo "📋 Applying schema..."

@@ -1,31 +1,18 @@
 <?xml version="1.0"?>
 <clickhouse>
-    <!-- Thread pool settings optimized for 16-core system -->
-    <max_thread_pool_size>64</max_thread_pool_size>     <!-- 4 threads per core -->
+    <!-- Basic thread control for 16-core system -->
+    <max_thread_pool_size>64</max_thread_pool_size>
     <max_thread_pool_free_size>16</max_thread_pool_free_size>
     
-    <!-- Query processing limits for 16 cores -->
+    <!-- Connection and query limits -->
     <max_concurrent_queries>30</max_concurrent_queries>
     <max_connections>200</max_connections>
     
-    <!-- Background processing limits for 16 cores -->
-    <background_pool_size>8</background_pool_size>      <!-- 0.5 per core -->
+    <!-- Background processing (conservative) -->
+    <background_pool_size>8</background_pool_size>
     <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
-    <background_move_pool_size>4</background_move_pool_size>
-    <background_fetches_pool_size>4</background_fetches_pool_size>
     
-    <!-- Memory management for larger system -->
-    <max_memory_usage>6000000000</max_memory_usage>     <!-- 6GB -->
-    <max_memory_usage_for_user>4000000000</max_memory_usage_for_user> <!-- 4GB per user -->
-    
-    <!-- Performance tuning -->
-    <mark_cache_size>2147483648</mark_cache_size>
-    <uncompressed_cache_size>1073741824</uncompressed_cache_size>
-    
-    <!-- Logging (reduced for performance) -->
-    <logger>
-        <level>warning</level>
-        <size>100M</size>
-        <count>3</count>
-    </logger>
+    <!-- Cache sizes (reasonable for 16-core) -->
+    <mark_cache_size>1073741824</mark_cache_size>        <!-- 1GB -->
+    <uncompressed_cache_size>536870912</uncompressed_cache_size> <!-- 512MB -->
 </clickhouse> 
