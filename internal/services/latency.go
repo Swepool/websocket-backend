@@ -9,23 +9,28 @@ import (
 	"websocket-backend/models"
 )
 
+// Constants for latency service
+const (
+	ChainsLoadDelay       = 10 * time.Second // Wait time for chains service to load
+	LatencyFetchTimeout   = 30 * time.Second // Timeout for latency data fetching
+	MinChainsForLatency   = 2                // Minimum chains needed for latency monitoring
+)
+
 // LatencyConfig holds latency monitoring configuration
 type LatencyConfig struct {
-	GraphQLURL       string        `json:"graphqlUrl"`       // GraphQL endpoint for latency data
-	CheckInterval    time.Duration `json:"checkInterval"`    // How often to check latency (default: 2 minutes)
-	RequestTimeout   time.Duration `json:"requestTimeout"`   // Timeout for individual latency checks
-	MaxConcurrency   int           `json:"maxConcurrency"`   // Max concurrent latency checks
-	HistoryRetention time.Duration `json:"historyRetention"` // How long to keep latency history
+	GraphQLURL     string        `json:"graphqlUrl"`     // GraphQL endpoint for latency data
+	CheckInterval  time.Duration `json:"checkInterval"`  // How often to check latency (default: 2 minutes)
+	RequestTimeout time.Duration `json:"requestTimeout"` // Timeout for individual latency checks
+	MaxConcurrency int           `json:"maxConcurrency"` // Max concurrent latency checks
 }
 
 // DefaultLatencyConfig returns default latency monitoring configuration
 func DefaultLatencyConfig() LatencyConfig {
 	return LatencyConfig{
-		GraphQLURL:       "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:    2 * time.Minute, // Same as chains for latency data
-		RequestTimeout:   5 * time.Second,
-		MaxConcurrency:   20,
-		HistoryRetention: 24 * time.Hour,
+		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
+		CheckInterval:  2 * time.Minute, // Same as chains for latency data
+		RequestTimeout: 5 * time.Second,
+		MaxConcurrency: 20,
 	}
 }
 
@@ -34,13 +39,13 @@ type LatencyUpdateCallback func([]models.LatencyData)
 
 // LatencyService manages cross-chain latency monitoring
 type LatencyService struct {
-	config           LatencyConfig
-	graphql          *graphql.Client
-	chainsService    *ChainsService // Reference to chains service for chain data
-	latencyData      map[string]models.LatencyData // Key: source_chain-dest_chain
-	mu               sync.RWMutex
-	latencyCallback  LatencyUpdateCallback
-	semaphore        chan struct{} // For limiting concurrent checks
+	config          LatencyConfig
+	graphql         *graphql.Client
+	chainsService   *ChainsService // Reference to chains service for chain data
+	latencyData     map[string]models.LatencyData // Key: source_chain-dest_chain
+	mu              sync.RWMutex
+	latencyCallback LatencyUpdateCallback
+	semaphore       chan struct{} // For limiting concurrent checks
 }
 
 // NewLatencyService creates a new latency monitoring service
@@ -65,15 +70,13 @@ func (s *LatencyService) Start(ctx context.Context) {
 
 	// Wait for chains to be loaded before starting latency monitoring
 	go func() {
-		// Wait 10 seconds for chains service to load chains
-		timer := time.NewTimer(10 * time.Second)
+		timer := time.NewTimer(ChainsLoadDelay)
 		defer timer.Stop()
 		
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			// Initial latency check after delay
 			s.refreshLatencyData(ctx)
 		}
 	}()
@@ -92,24 +95,55 @@ func (s *LatencyService) Start(ctx context.Context) {
 	}
 }
 
-// FetchLatencyData fetches latency statistics for all chain pairs
-func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.LatencyData, error) {
+// generateLatencyKey creates a consistent key for latency data storage
+func (s *LatencyService) generateLatencyKey(sourceChain, destChain string) string {
+	return sourceChain + "-" + destChain
+}
+
+// fetchLatencyForPair fetches latency data for a single chain pair
+func (s *LatencyService) fetchLatencyForPair(ctx context.Context, source, dest models.Chain) (*models.LatencyData, error) {
+	latencyCtx, cancel := context.WithTimeout(ctx, s.config.RequestTimeout)
+	defer cancel()
+
+	latency, err := s.graphql.FetchLatency(latencyCtx, source.UniversalChainID, dest.UniversalChainID)
+	if err != nil {
+		return nil, err
+	}
+
+	if latency != nil {
+		// Enhance with chain display names
+		latency.SourceName = source.DisplayName
+		latency.DestinationName = dest.DisplayName
+	}
+
+	return latency, nil
+}
+
+// validateChainsForLatency checks if we have enough chains for latency monitoring
+func (s *LatencyService) validateChainsForLatency() ([]models.Chain, error) {
 	if s.chainsService == nil {
 		utils.LogWarn("LATENCY_SERVICE", "No chains service available for latency data")
-		return []models.LatencyData{}, nil
+		return []models.Chain{}, nil
 	}
 
 	chains := s.chainsService.GetAllChains()
-	if len(chains) < 2 {
+	if len(chains) < MinChainsForLatency {
 		utils.LogWarn("LATENCY_SERVICE", "Not enough chains for latency data (%d chains)", len(chains))
-		return []models.LatencyData{}, nil // Need at least 2 chains for latency data
+		return []models.Chain{}, nil
+	}
+
+	return chains, nil
+}
+
+// FetchLatencyData fetches latency statistics for all chain pairs
+func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.LatencyData, error) {
+	chains, err := s.validateChainsForLatency()
+	if err != nil || len(chains) == 0 {
+		return []models.LatencyData{}, err
 	}
 
 	var latencyData []models.LatencyData
-	successCount := 0
-	errorCount := 0
-
-	// Use semaphore to limit concurrent requests
+	var successCount, errorCount int
 	var wg sync.WaitGroup
 	var latencyMu sync.Mutex
 
@@ -136,25 +170,18 @@ func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.Latency
 				default:
 				}
 
-				// Use shorter timeout for individual requests to staging endpoint
-				latencyCtx, latencyCancel := context.WithTimeout(ctx, s.config.RequestTimeout)
-				latency, err := s.graphql.FetchLatency(latencyCtx, source.UniversalChainID, dest.UniversalChainID)
-				latencyCancel()
+				latency, err := s.fetchLatencyForPair(ctx, source, dest)
 
 				latencyMu.Lock()
 				defer latencyMu.Unlock()
 
 				if err != nil {
 					errorCount++
-					// Log error but continue with other pairs
 					utils.LogWarn("LATENCY_SERVICE", "Failed to fetch latency for %s -> %s: %v", source.DisplayName, dest.DisplayName, err)
 					return
 				}
 
 				if latency != nil {
-					// Enhance with chain display names
-					latency.SourceName = source.DisplayName
-					latency.DestinationName = dest.DisplayName
 					latencyData = append(latencyData, *latency)
 					successCount++
 				}
@@ -164,21 +191,23 @@ func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.Latency
 
 	wg.Wait()
 
+	s.logFetchResults(successCount, errorCount)
+	return latencyData, nil
+}
+
+// logFetchResults logs the results of latency data fetching
+func (s *LatencyService) logFetchResults(successCount, errorCount int) {
 	if successCount > 0 {
 		utils.LogInfo("LATENCY_SERVICE", "Successfully fetched latency data for %d chain pairs (%d failed)", successCount, errorCount)
 	} else if errorCount > 0 {
 		utils.LogWarn("LATENCY_SERVICE", "Failed to fetch latency data for all %d chain pairs attempted", errorCount)
 	}
-
-	return latencyData, nil
 }
 
 // refreshLatencyData fetches and updates latency data
 func (s *LatencyService) refreshLatencyData(ctx context.Context) {
-	// Run latency fetching in background so it doesn't block shutdown
 	go func() {
-		// Add timeout for staging endpoint but don't block main thread
-		latencyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		latencyCtx, cancel := context.WithTimeout(ctx, LatencyFetchTimeout)
 		defer cancel()
 
 		latencyData, err := s.FetchLatencyData(latencyCtx)
@@ -187,10 +216,8 @@ func (s *LatencyService) refreshLatencyData(ctx context.Context) {
 			return
 		}
 
-		// Update stored latency data
 		s.updateLatencyData(latencyData)
 
-		// Only call callback if we have latency data or if callback is set
 		if s.latencyCallback != nil && len(latencyData) > 0 {
 			s.latencyCallback(latencyData)
 			utils.LogInfo("LATENCY_SERVICE", "Updated latency data for %d chain pairs", len(latencyData))
@@ -207,7 +234,7 @@ func (s *LatencyService) updateLatencyData(latencyData []models.LatencyData) {
 
 	// Update latency data (key: source-dest pair)
 	for _, data := range latencyData {
-		key := data.SourceChain + "-" + data.DestinationChain
+		key := s.generateLatencyKey(data.SourceChain, data.DestinationChain)
 		s.latencyData[key] = data
 	}
 }
@@ -240,20 +267,15 @@ func (s *LatencyService) GetLatencyForPair(sourceChain, destChain string) (model
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	key := sourceChain + "-" + destChain
+	key := s.generateLatencyKey(sourceChain, destChain)
 	data, exists := s.latencyData[key]
 	return data, exists
 }
 
-// GetLatencyStats returns statistics about latency monitoring
-func (s *LatencyService) GetLatencyStats() map[string]interface{} {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	totalPairs := len(s.latencyData)
+// calculateLatencyStats computes statistical metrics from latency data
+func (s *LatencyService) calculateLatencyStats() (totalPairs int, avgLatency, maxLatency, minLatency float64) {
 	totalLatency := 0.0
-	maxLatency := 0.0
-	minLatency := -1.0
+	minLatency = -1.0
 
 	for _, data := range s.latencyData {
 		// Use PacketAck median as the primary latency metric
@@ -269,10 +291,20 @@ func (s *LatencyService) GetLatencyStats() map[string]interface{} {
 		}
 	}
 
-	avgLatency := 0.0
+	totalPairs = len(s.latencyData)
 	if totalPairs > 0 {
 		avgLatency = totalLatency / float64(totalPairs)
 	}
+
+	return
+}
+
+// GetLatencyStats returns statistics about latency monitoring
+func (s *LatencyService) GetLatencyStats() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	totalPairs, avgLatency, maxLatency, minLatency := s.calculateLatencyStats()
 
 	return map[string]interface{}{
 		"total_pairs":     totalPairs,

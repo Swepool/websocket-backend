@@ -7,26 +7,26 @@ import (
 // Channels holds all communication channels for the clean modular pipeline
 type Channels struct {
 	// Clean pipeline flow: Fetcher → Processor → {Broadcaster, Batcher}
-	RawTransfers        chan []models.Transfer // Fetcher → Processor
-	BatchedTransfers    chan models.Transfer   // Processor → Batcher (for DB)
-	WebSocketBroadcasts chan models.Transfer   // Processor → Broadcaster (with natural timing)
-	DatabaseSaves       chan []models.Transfer // BackwardFetcher → Database (for historical data)
+	RawTransfers        chan []models.Transfer // Fetcher → Processor (batches of 100)
+	BatchedTransfers    chan models.Transfer   // Processor → Batcher (individual transfers for real-time DB)
+	WebSocketBroadcasts chan models.Transfer   // Processor → Broadcaster (individual transfers with natural timing)
+	DatabaseSaves       chan []models.Transfer // BackwardFetcher → Database (batches of 100 for historical data)
 }
 
-// NewChannels creates and initializes all channels with optimized buffer sizes for the new architecture
+// NewChannels creates and initializes all channels with optimized buffer sizes for dual sync mode
 func NewChannels() *Channels {
 	return &Channels{
 		// Raw transfers from fetcher to processor (batched)
-		RawTransfers: make(chan []models.Transfer, 1000),
+		RawTransfers: make(chan []models.Transfer, 2000),  
 		
 		// Individual transfers from processor to batcher (for efficient DB writes)
-		BatchedTransfers: make(chan models.Transfer, 10000),
+		BatchedTransfers: make(chan models.Transfer, 50000),
 		
 		// Individual transfers from processor to broadcaster (WebSocket with natural timing)
-		WebSocketBroadcasts: make(chan models.Transfer, 10000),  // Increased for 200 TPS (50s buffer)
+		WebSocketBroadcasts: make(chan models.Transfer, 25000),
 		
 		// Batched historical transfers from backward fetcher to database
-		DatabaseSaves: make(chan []models.Transfer, 500),
+		DatabaseSaves: make(chan []models.Transfer, 1000),
 	}
 }
 

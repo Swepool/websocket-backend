@@ -40,9 +40,10 @@ func NewChartBroadcaster(clickhouseService *ClickHouseService, broadcasterInstan
 	}
 }
 
-// BroadcastChartUpdate broadcasts updated chart data to all connected clients
+// BroadcastChartUpdate broadcasts chart data to all connected clients (cache-first)
+// This method now primarily serves from cache (6-minute TTL) populated by staggered updates
 func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
-	utils.LogDebug("CHART_BROADCASTER", "Broadcasting chart data update via ClickHouse")
+	utils.LogDebug("CHART_BROADCASTER", "Broadcasting chart data update (cache-first) via ClickHouse")
 	
 	// Get optimized chart data from ClickHouse
 	transferRates, err := cb.clickhouseService.GetTransferRates(ctx)
@@ -282,5 +283,70 @@ func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
 		cb.broadcasterInstance.BroadcastChartData(chartData)
 	}
 	
-	utils.LogDebug("CHART_BROADCASTER", "Chart data broadcasted successfully via ClickHouse")
+	utils.LogDebug("CHART_BROADCASTER", "Chart data broadcast completed (cache-first) via ClickHouse")
+}
+
+// UpdateChartGroupA updates the first group of charts (rates, routes, chains)
+func (cb *ChartBroadcaster) UpdateChartGroupA(ctx context.Context) {
+	utils.LogInfo("CHART_BROADCASTER", "Updating chart group A: rates, routes, chains")
+	
+	// Group A: Transfer rates, wallet rates, popular routes, chain flows
+	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
+	
+	// Update transfer rates (cache TTL: 6 minutes)
+	if _, err := cb.clickhouseService.GetTransferRates(ctx); err != nil {
+		utils.LogError("CHART_BROADCASTER", "Failed to update transfer rates: %v", err)
+	}
+	
+	// Update active wallet rates (cache TTL: 6 minutes)
+	if _, err := cb.clickhouseService.GetActiveWalletRates(ctx); err != nil {
+		utils.LogError("CHART_BROADCASTER", "Failed to update active wallet rates: %v", err)
+	}
+	
+	// Update popular routes for all timeframes (cache TTL: 6 minutes)
+	for _, tf := range timeframes {
+		if _, err := cb.clickhouseService.GetPopularRoutes(ctx, 20, tf); err != nil {
+			utils.LogDebug("CHART_BROADCASTER", "Failed to update popular routes for %s: %v", tf, err)
+		}
+	}
+	
+	// Update chain flow data for all timeframes (cache TTL: 6 minutes)
+	for _, tf := range timeframes {
+		if _, err := cb.clickhouseService.GetChainFlowData(ctx, tf); err != nil {
+			utils.LogDebug("CHART_BROADCASTER", "Failed to update chain flows for %s: %v", tf, err)
+		}
+	}
+	
+	utils.LogInfo("CHART_BROADCASTER", "Chart group A update completed")
+}
+
+// UpdateChartGroupB updates the second group of charts (assets, senders, receivers)
+func (cb *ChartBroadcaster) UpdateChartGroupB(ctx context.Context) {
+	utils.LogInfo("CHART_BROADCASTER", "Updating chart group B: assets, senders, receivers")
+	
+	// Group B: Asset volumes, active senders, active receivers
+	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
+	
+	// Update asset volumes for all timeframes (cache TTL: 6 minutes)
+	for _, tf := range timeframes {
+		if _, err := cb.clickhouseService.GetAssetVolumes(ctx, tf); err != nil {
+			utils.LogError("CHART_BROADCASTER", "Failed to update asset volumes for %s: %v", tf, err)
+		}
+	}
+	
+	// Update active senders for all timeframes (cache TTL: 6 minutes)
+	for _, tf := range timeframes {
+		if _, err := cb.clickhouseService.GetTopSenders(ctx, 10, tf); err != nil {
+			utils.LogDebug("CHART_BROADCASTER", "Failed to update active senders for %s: %v", tf, err)
+		}
+	}
+	
+	// Update active receivers for all timeframes (cache TTL: 6 minutes)
+	for _, tf := range timeframes {
+		if _, err := cb.clickhouseService.GetTopReceivers(ctx, 10, tf); err != nil {
+			utils.LogDebug("CHART_BROADCASTER", "Failed to update active receivers for %s: %v", tf, err)
+		}
+	}
+	
+	utils.LogInfo("CHART_BROADCASTER", "Chart group B update completed")
 } 

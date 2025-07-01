@@ -309,22 +309,41 @@ func (c *Coordinator) Health(ctx context.Context) map[string]interface{} {
 
 // startChartUpdates handles periodic chart data broadcasts to WebSocket clients
 func (c *Coordinator) startChartUpdates(ctx context.Context) {
-	utils.LogInfo("COORDINATOR", "Starting chart data updates (1 minute intervals)")
+	utils.LogInfo("COORDINATOR", "Starting staggered chart data updates (2 minute cycle)")
 	
-	// Send initial chart data immediately
-	c.broadcastChartUpdate(ctx)
+	// Initial update - populate both groups immediately
+	c.chartBroadcaster.UpdateChartGroupA(ctx)
+	time.Sleep(30 * time.Second) // Brief delay between initial groups
+	c.chartBroadcaster.UpdateChartGroupB(ctx)
 	
-	// Set up periodic updates every 1 minute
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	// Broadcast complete chart data every minute (mostly from cache)
+	broadcastTicker := time.NewTicker(1 * time.Minute)
+	defer broadcastTicker.Stop()
+	
+	// Update chart groups every 2 minutes, alternating
+	updateTicker := time.NewTicker(2 * time.Minute)
+	defer updateTicker.Stop()
+	
+	isGroupA := true // Start with Group A on first update cycle
 	
 	for {
 		select {
 		case <-ctx.Done():
 			utils.LogInfo("COORDINATOR", "Chart updates stopping")
 			return
-		case <-ticker.C:
+		case <-broadcastTicker.C:
+			// Broadcast complete chart data every minute (cache-first)
 			c.broadcastChartUpdate(ctx)
+		case <-updateTicker.C:
+			// Update one chart group every 2 minutes
+			if isGroupA {
+				utils.LogInfo("COORDINATOR", "Updating chart group A (rates, routes, chains)")
+				c.chartBroadcaster.UpdateChartGroupA(ctx)
+			} else {
+				utils.LogInfo("COORDINATOR", "Updating chart group B (assets, senders, receivers)")
+				c.chartBroadcaster.UpdateChartGroupB(ctx)
+			}
+			isGroupA = !isGroupA
 		}
 	}
 }

@@ -15,6 +15,13 @@ import (
 	"websocket-backend/models"
 )
 
+// Health check thresholds
+const (
+	HealthyThreshold   = 0.8 // 80% or more checks must pass
+	DegradedThreshold  = 0.5 // 50-79% checks pass
+	// Below 50% = unhealthy
+)
+
 // Config holds node health checker configuration
 type Config struct {
 	GraphQLURL      string        `json:"graphqlUrl"`      // GraphQL endpoint URL
@@ -241,34 +248,12 @@ func (s *Service) checkSingleNode(ctx context.Context, chain models.Chain, rpc m
 	}
 	
 	// Determine overall health status based on success rate
-	successRate := float64(successfulChecks) / float64(len(results))
-	switch {
-	case successRate >= 0.8: // 80% or more checks passed
-		healthData.Status = "healthy"
-		healthData.LatestBlockHeight = blockHeight
-		utils.LogDebug("NODE_HEALTH", "Node %s (%s) healthy: %d/%d checks passed, %dms", 
-			chain.DisplayName, rpc.URL, successfulChecks, len(results), healthData.ResponseTimeMs)
-	case successRate >= 0.5: // 50-79% checks passed
-		healthData.Status = "degraded"
-		healthData.LatestBlockHeight = blockHeight
-		healthData.ErrorMessage = fmt.Sprintf("Partial failure: %d/%d checks failed", 
-			len(results)-successfulChecks, len(results))
-		utils.LogWarn("NODE_HEALTH", "Node %s (%s) degraded: %d/%d checks passed", 
-			chain.DisplayName, rpc.URL, successfulChecks, len(results))
-	default: // Less than 50% checks passed
-		healthData.Status = "unhealthy"
-		if len(errorMessages) > 0 {
-			healthData.ErrorMessage = strings.Join(errorMessages, "; ")
-		} else {
-			healthData.ErrorMessage = fmt.Sprintf("Failed %d/%d health checks", 
-				len(results)-successfulChecks, len(results))
-		}
-		utils.LogWarn("NODE_HEALTH", "Node %s (%s) unhealthy: %d/%d checks failed", 
-			chain.DisplayName, rpc.URL, len(results)-successfulChecks, len(results))
-	}
+	healthData.Status, healthData.ErrorMessage = s.determineHealthStatus(successfulChecks, len(results), blockHeight, errorMessages, chain, rpc)
 	
-	// Calculate uptime based on recent history
-	healthData.Uptime = s.calculateUptime(rpc.URL)
+	// Set block height for healthy and degraded nodes
+	if healthData.Status == "healthy" || healthData.Status == "degraded" {
+		healthData.LatestBlockHeight = blockHeight
+	}
 	
 	return healthData
 }
@@ -320,6 +305,7 @@ func (s *Service) checkCosmosStatus(ctx context.Context, rpcURL string) HealthCh
 		"params":  []interface{}{},
 	}
 	
+	// Perform the basic JSON-RPC call and parse Cosmos-specific response
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to marshal request: %w", err)
@@ -467,6 +453,7 @@ func (s *Service) checkEvmBlockNumber(ctx context.Context, rpcURL string) Health
 		"params":  []interface{}{},
 	}
 	
+	// Perform the basic JSON-RPC call and parse EVM-specific response
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to marshal request: %w", err)
@@ -664,61 +651,84 @@ func (s *Service) GetHealthDataInterface() []interface{} {
 	return []interface{}{summary}
 }
 
-// GetHealthSummary returns health data in the NodeHealthSummary format expected by the frontend
-func (s *Service) GetHealthSummary() interface{} {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// determineHealthStatus determines the health status based on success rate
+func (s *Service) determineHealthStatus(successfulChecks, totalChecks int, blockHeight *int64, errorMessages []string, chain models.Chain, rpc models.Rpc) (status string, errorMessage string) {
+	successRate := float64(successfulChecks) / float64(totalChecks)
 	
-	// Convert health data to interface{} array for nodesWithRpcs
-	nodesWithRpcs := make([]interface{}, 0, len(s.healthData))
-	
-	// Count status types and calculate total response time
-	var healthyNodes, degradedNodes, unhealthyNodes int
-	var totalResponseTime int
-	var totalNodes int
-	
-	chainHealthStats := make(map[string]interface{})
-	chainCounts := make(map[string]map[string]int) // chainName -> {healthy, degraded, unhealthy, total}
-	chainResponseTimes := make(map[string][]int)   // chainName -> response times
-	
-	for _, data := range s.healthData {
-		// Convert to interface{} for frontend
-		nodeInterface := map[string]interface{}{
-			"chainId":         data.ChainID,
-			"chainName":       data.ChainName,
-			"rpcUrl":          data.RpcURL,
-			"rpcType":         data.RpcType,
-			"status":          data.Status,
-			"responseTimeMs":  data.ResponseTimeMs,
-			"lastCheckTime":   data.LastCheckTime,
-			"uptime":          data.Uptime,
-		}
+	switch {
+	case successRate >= HealthyThreshold:
+		utils.LogDebug("NODE_HEALTH", "Node %s (%s) healthy: %d/%d checks passed", 
+			chain.DisplayName, rpc.URL, successfulChecks, totalChecks)
+		return "healthy", ""
 		
-		// Add optional fields
-		if data.LatestBlockHeight != nil {
-			nodeInterface["latestBlockHeight"] = *data.LatestBlockHeight
-		}
-		if data.ErrorMessage != "" {
-			nodeInterface["errorMessage"] = data.ErrorMessage
-		}
+	case successRate >= DegradedThreshold:
+		errorMsg := fmt.Sprintf("Partial failure: %d/%d checks failed", 
+			totalChecks-successfulChecks, totalChecks)
+		utils.LogWarn("NODE_HEALTH", "Node %s (%s) degraded: %d/%d checks passed", 
+			chain.DisplayName, rpc.URL, successfulChecks, totalChecks)
+		return "degraded", errorMsg
 		
-		nodesWithRpcs = append(nodesWithRpcs, nodeInterface)
-		
-		// Count status types
+	default:
+		var errorMsg string
+		if len(errorMessages) > 0 {
+			errorMsg = strings.Join(errorMessages, "; ")
+		} else {
+			errorMsg = fmt.Sprintf("Failed %d/%d health checks", 
+				totalChecks-successfulChecks, totalChecks)
+		}
+		utils.LogWarn("NODE_HEALTH", "Node %s (%s) unhealthy: %d/%d checks failed", 
+			chain.DisplayName, rpc.URL, totalChecks-successfulChecks, totalChecks)
+		return "unhealthy", errorMsg
+	}
+}
+
+// convertNodeToInterface converts NodeHealthData to interface{} map for frontend
+func (s *Service) convertNodeToInterface(data models.NodeHealthData) map[string]interface{} {
+	nodeInterface := map[string]interface{}{
+		"chainId":         data.ChainID,
+		"chainName":       data.ChainName,
+		"rpcUrl":          data.RpcURL,
+		"rpcType":         data.RpcType,
+		"status":          data.Status,
+		"responseTimeMs":  data.ResponseTimeMs,
+		"lastCheckTime":   data.LastCheckTime,
+	}
+	
+	// Add optional fields
+	if data.LatestBlockHeight != nil {
+		nodeInterface["latestBlockHeight"] = *data.LatestBlockHeight
+	}
+	if data.ErrorMessage != "" {
+		nodeInterface["errorMessage"] = data.ErrorMessage
+	}
+	
+	return nodeInterface
+}
+
+// aggregateStatusCounts counts the different health statuses
+func (s *Service) aggregateStatusCounts(healthData map[string]models.NodeHealthData) (healthy, degraded, unhealthy, totalNodes int, totalResponseTime int) {
+	for _, data := range healthData {
 		totalNodes++
 		switch data.Status {
 		case "healthy":
-			healthyNodes++
+			healthy++
 		case "degraded":
-			degradedNodes++
+			degraded++
 		case "unhealthy":
-			unhealthyNodes++
+			unhealthy++
 		}
-		
-		// Track response time
 		totalResponseTime += data.ResponseTimeMs
-		
-		// Track per-chain stats
+	}
+	return
+}
+
+// buildChainHealthStats calculates per-chain health statistics
+func (s *Service) buildChainHealthStats(healthData map[string]models.NodeHealthData) map[string]interface{} {
+	chainCounts := make(map[string]map[string]int)
+	chainResponseTimes := make(map[string][]int)
+	
+	// Collect data per chain
+	for _, data := range healthData {
 		if chainCounts[data.ChainName] == nil {
 			chainCounts[data.ChainName] = make(map[string]int)
 		}
@@ -727,7 +737,8 @@ func (s *Service) GetHealthSummary() interface{} {
 		chainResponseTimes[data.ChainName] = append(chainResponseTimes[data.ChainName], data.ResponseTimeMs)
 	}
 	
-	// Calculate per-chain health stats
+	// Calculate stats per chain
+	chainHealthStats := make(map[string]interface{})
 	for chainName, counts := range chainCounts {
 		avgResponseTime := 0.0
 		if len(chainResponseTimes[chainName]) > 0 {
@@ -738,27 +749,39 @@ func (s *Service) GetHealthSummary() interface{} {
 			avgResponseTime = float64(sum) / float64(len(chainResponseTimes[chainName]))
 		}
 		
-		// Calculate uptime percentage (simplified - healthy + degraded nodes)
-		uptime := 0.0
-		if counts["total"] > 0 {
-			healthyAndDegraded := counts["healthy"] + counts["degraded"]
-			uptime = float64(healthyAndDegraded) / float64(counts["total"]) * 100
-		}
-		
 		chainHealthStats[chainName] = map[string]interface{}{
 			"chainName":       chainName,
 			"healthyNodes":    counts["healthy"],
 			"totalNodes":      counts["total"],
 			"avgResponseTime": avgResponseTime,
-			"uptime":          uptime,
 		}
 	}
+	
+	return chainHealthStats
+}
+
+// GetHealthSummary returns health data in the NodeHealthSummary format expected by the frontend
+func (s *Service) GetHealthSummary() interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	// Convert health data to interface{} array for nodesWithRpcs
+	nodesWithRpcs := make([]interface{}, 0, len(s.healthData))
+	for _, data := range s.healthData {
+		nodesWithRpcs = append(nodesWithRpcs, s.convertNodeToInterface(data))
+	}
+	
+	// Aggregate status counts and response times
+	healthyNodes, degradedNodes, unhealthyNodes, totalNodes, totalResponseTime := s.aggregateStatusCounts(s.healthData)
 	
 	// Calculate average response time
 	avgResponseTime := 0.0
 	if totalNodes > 0 {
 		avgResponseTime = float64(totalResponseTime) / float64(totalNodes)
 	}
+	
+	// Build per-chain health statistics
+	chainHealthStats := s.buildChainHealthStats(s.healthData)
 	
 	// Create the summary object that matches the frontend interface
 	summary := map[string]interface{}{
@@ -795,29 +818,7 @@ func (s *Service) isRpcEndpoint(url string) bool {
 		return true
 	}
 	
-	// For EVM chains, sometimes endpoints don't contain "rpc" in the name
-	// but are still RPC endpoints. We can identify them by checking if they're
-	// from known RPC endpoint patterns or if they don't match REST/GRPC patterns
-	
-	// If it doesn't contain grpc, rest, or api, it's likely an RPC endpoint
 	return true
 }
 
-// calculateUptime calculates uptime percentage for a node (simplified version)
-func (s *Service) calculateUptime(rpcURL string) float64 {
-	// For now, return a placeholder value
-	// In a full implementation, this would query historical data
-	s.mu.RLock()
-	data, exists := s.healthData[rpcURL]
-	s.mu.RUnlock()
-	
-	if !exists {
-		return 0.0
-	}
-	
-	// Simplified uptime calculation - in production this would use historical data
-	if data.Status == "healthy" || data.Status == "degraded" {
-		return 100.0
-	}
-	return 0.0
-} 
+ 
