@@ -17,21 +17,9 @@ services:
       - clickhouse_logs:/var/log/clickhouse-server
       # Mount user configuration to allow default user from any host
       - ./users.xml:/etc/clickhouse-server/users.d/users.xml:ro
-      # Mount server configuration to control threading
-      - ./config.xml:/etc/clickhouse-server/config.d/threading.xml:ro
       # Mount schema initialization script
       - ../internal/storage/clickhouse_schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
       
-    # Resource limits optimized for 16-core system
-    deploy:
-      resources:
-        limits:
-          cpus: '12.0'     # Allow 12 of 16 cores (keep 4 for your app)
-          memory: 8G       # Allow 8GB RAM
-        reservations:
-          cpus: '4.0'      # Reserve 4 CPU cores
-          memory: 4G       # Reserve 4GB RAM
-    
     ulimits:
       nofile:
         soft: 262144
