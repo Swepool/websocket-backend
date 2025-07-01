@@ -19,6 +19,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// BroadcasterInterface defines the common interface for all broadcaster implementations
+type BroadcasterInterface interface {
+	Start(ctx context.Context)
+	UpgradeConnection(w http.ResponseWriter, r *http.Request)
+	GetClientCount() int
+	GetType() string
+	GetShardStats() map[string]interface{}
+	BroadcastChartData(data interface{})
+	SetChartService(chartService interface{})
+}
+
 // Client represents a WebSocket client with shard information and enhanced management
 type Client struct {
 	id       string

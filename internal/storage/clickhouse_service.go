@@ -52,16 +52,18 @@ func NewClickHouseService(config ClickHouseConfig) (*ClickHouseService, error) {
 			}
 		},
 		Settings: clickhouse.Settings{
-			"max_execution_time": 60,
-			"max_memory_usage":   "10000000000", // 10GB
+			"max_execution_time": 30,          // Query timeout (client-level)
+			"max_memory_usage":   "4000000000", // Max memory per query (client-level)
+			"max_threads":        8,            // Max threads per query (client-level)
+			// Server-level settings moved to config.xml
 		},
 		Compression: &clickhouse.Compression{
 			Method: clickhouse.CompressionLZ4,
 		},
-		DialTimeout:     30 * time.Second,
-		MaxOpenConns:    10,
-		MaxIdleConns:    5,
-		ConnMaxLifetime: time.Hour,
+		DialTimeout:     15 * time.Second,
+		MaxOpenConns:    8,   // Increased for 16-core system (but still controlled)
+		MaxIdleConns:    4,   // Keep some idle connections for performance
+		ConnMaxLifetime: 30 * time.Minute, // Shorter lifetime
 	}
 
 	// Create connection
