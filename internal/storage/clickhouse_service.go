@@ -53,8 +53,8 @@ func NewClickHouseService(config ClickHouseConfig) (*ClickHouseService, error) {
 		},
 		Settings: clickhouse.Settings{
 			"max_execution_time": 30,          // Query timeout (client-level)
-			"max_memory_usage":   "4000000000", // Max memory per query (client-level)
-			"max_threads":        8,            // Max threads per query (client-level)
+			"max_memory_usage":   "2000000000", // Reduced from 4GB to 2GB per query
+			"max_threads":        4,            // Reduced from 8 to 4 threads per query
 			// Server-level settings moved to config.xml
 		},
 		Compression: &clickhouse.Compression{

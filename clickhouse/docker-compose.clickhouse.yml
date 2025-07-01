@@ -19,7 +19,10 @@ services:
       - ./users.xml:/etc/clickhouse-server/users.d/users.xml:ro
       # Mount schema initialization script
       - ../internal/storage/clickhouse_schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      
+
+    # CPU allocation: 8 logical threads (threads 0 to 7)
+    cpuset: "0-7"
+
     ulimits:
       nofile:
         soft: 262144
@@ -55,4 +58,4 @@ volumes:
 networks:
   default:
     name: websocket-backend-network
-    external: false 
+    external: false

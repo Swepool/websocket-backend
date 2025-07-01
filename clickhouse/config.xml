@@ -1,18 +1,18 @@
 <?xml version="1.0"?>
 <clickhouse>
-    <!-- Basic thread control for 16-core system -->
-    <max_thread_pool_size>64</max_thread_pool_size>
-    <max_thread_pool_free_size>16</max_thread_pool_free_size>
-    
-    <!-- Connection and query limits -->
+    <!-- Thread pool tuned for 8 logical CPUs -->
+    <max_thread_pool_size>32</max_thread_pool_size>           <!-- ~4× CPU -->
+    <max_thread_pool_free_size>8</max_thread_pool_free_size>  <!-- 1× CPU -->
+
+    <!-- Connection and query limits (unchanged) -->
     <max_concurrent_queries>30</max_concurrent_queries>
     <max_connections>200</max_connections>
-    
-    <!-- Background processing (conservative) -->
-    <background_pool_size>8</background_pool_size>
+
+    <!-- Background processing tuned for 8 logical CPUs -->
+    <background_pool_size>4</background_pool_size>  <!-- ~50% of cores -->
     <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
-    
-    <!-- Cache sizes (reasonable for 16-core) -->
-    <mark_cache_size>1073741824</mark_cache_size>        <!-- 1GB -->
+
+    <!-- Cache sizes (unchanged, reasonable for modern systems) -->
+    <mark_cache_size>1073741824</mark_cache_size>         <!-- 1GB -->
     <uncompressed_cache_size>536870912</uncompressed_cache_size> <!-- 512MB -->
-</clickhouse> 
+</clickhouse>
