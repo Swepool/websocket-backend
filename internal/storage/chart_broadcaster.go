@@ -12,31 +12,17 @@ type BroadcasterInterface interface {
 	BroadcastChartData(data interface{})
 }
 
-// LatencyServiceInterface defines the interface for latency data access
-type LatencyServiceInterface interface {
-	GetLatencyDataInterface() []interface{} // Returns []models.LatencyData but we use interface{} to avoid import cycle
-}
-
-// NodeHealthServiceInterface defines the interface for node health data access
-type NodeHealthServiceInterface interface {
-	GetHealthDataInterface() []interface{} // Returns []models.NodeHealthData but we use interface{} to avoid import cycle
-}
-
 // ChartBroadcaster handles broadcasting chart data updates to WebSocket clients
 type ChartBroadcaster struct {
-	clickhouseService     *ClickHouseService
-	broadcasterInstance   BroadcasterInterface
-	latencyService        LatencyServiceInterface
-	nodeHealthService     NodeHealthServiceInterface
+	clickhouseService   *ClickHouseService
+	broadcasterInstance BroadcasterInterface
 }
 
 // NewChartBroadcaster creates a new chart broadcaster with ClickHouse
-func NewChartBroadcaster(clickhouseService *ClickHouseService, broadcasterInstance BroadcasterInterface, latencyService LatencyServiceInterface, nodeHealthService NodeHealthServiceInterface) *ChartBroadcaster {
+func NewChartBroadcaster(clickhouseService *ClickHouseService, broadcasterInstance BroadcasterInterface) *ChartBroadcaster {
 	return &ChartBroadcaster{
-		clickhouseService:     clickhouseService,
-		broadcasterInstance:   broadcasterInstance,
-		latencyService:        latencyService,
-		nodeHealthService:     nodeHealthService,
+		clickhouseService:   clickhouseService,
+		broadcasterInstance: broadcasterInstance,
 	}
 }
 

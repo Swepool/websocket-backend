@@ -27,12 +27,10 @@ type ClickHouseConfig struct {
 
 // ClickHouseService handles ClickHouse operations for analytics with caching
 type ClickHouseService struct {
-	conn               clickhouse_driver.Conn
-	config             ClickHouseConfig
-	cache              *ChartDataCache
-	cacheConfig        CacheConfig
-	latencyService     LatencyServiceInterface
-	nodeHealthService  NodeHealthServiceInterface
+	conn        clickhouse_driver.Conn
+	config      ClickHouseConfig
+	cache       *ChartDataCache
+	cacheConfig CacheConfig
 }
 
 // NewClickHouseService creates a new ClickHouse service
@@ -99,15 +97,7 @@ func (c *ClickHouseService) Close() error {
 	return nil
 }
 
-// SetLatencyService sets the latency service for initial chart data
-func (c *ClickHouseService) SetLatencyService(latencyService LatencyServiceInterface) {
-	c.latencyService = latencyService
-}
 
-// SetNodeHealthService sets the node health service for initial chart data
-func (c *ClickHouseService) SetNodeHealthService(nodeHealthService NodeHealthServiceInterface) {
-	c.nodeHealthService = nodeHealthService
-}
 
 // GetCache returns the cache instance for external services to use
 func (c *ClickHouseService) GetCache() *ChartDataCache {
@@ -608,29 +598,23 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 	// Update asset volume data with timeScale
 	assetVolumeData.AssetVolumeTimeScale = assetVolumeTimeScale
 
-	// Get latency data for initial client connections
+	// Get latency data for initial client connections (cache-first for consistency)
 	var latencyData []interface{}
-	if c.latencyService != nil {
-		latencyData = c.latencyService.GetLatencyDataInterface()
-		utils.LogInfo("CLICKHOUSE", "Retrieved %d latency data points for initial client data", len(latencyData))
+	if data, hit := c.cache.Get("latency_data"); hit {
+		latencyData = data.([]interface{})
+		utils.LogInfo("CLICKHOUSE", "Retrieved %d latency data points from cache for initial client data", len(latencyData))
 	} else {
-		utils.LogWarn("CLICKHOUSE", "No latency service available for initial client data")
+		utils.LogWarn("CLICKHOUSE", "No cached latency data available for initial client data")
 		latencyData = []interface{}{}
 	}
 
-	// Get node health data for initial client connections
+	// Get node health data for initial client connections (cache-first for consistency)
 	var nodeHealthData interface{}
-	if c.nodeHealthService != nil {
-		// Get the summary object directly, not as an array
-		if healthDataArray := c.nodeHealthService.GetHealthDataInterface(); len(healthDataArray) > 0 {
-			nodeHealthData = healthDataArray[0] // Extract the first (and only) summary object
-			utils.LogInfo("CLICKHOUSE", "Retrieved node health summary data for initial client data")
-		} else {
-			nodeHealthData = nil
-			utils.LogWarn("CLICKHOUSE", "No node health data available for initial client data")
-		}
+	if data, hit := c.cache.Get("node_health_data"); hit {
+		nodeHealthData = data
+		utils.LogInfo("CLICKHOUSE", "Retrieved cached node health summary data for initial client data")
 	} else {
-		utils.LogWarn("CLICKHOUSE", "No node health service available for initial client data")
+		utils.LogWarn("CLICKHOUSE", "No cached node health data available for initial client data")
 		nodeHealthData = nil
 	}
 

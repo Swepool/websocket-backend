@@ -663,12 +663,7 @@ func (s *Service) GetHealthData() []models.NodeHealthData {
 	return result
 }
 
-// GetHealthDataInterface returns current health data as []interface{} for chart broadcaster
-func (s *Service) GetHealthDataInterface() []interface{} {
-	// Return the summary object that the frontend expects, not the raw array
-	summary := s.GetHealthSummary()
-	return []interface{}{summary}
-}
+
 
 // determineHealthStatus determines the health status based on success rate
 func (s *Service) determineHealthStatus(successfulChecks, totalChecks int, blockHeight *int64, errorMessages []string, chain models.Chain, rpc models.Rpc) (status string, errorMessage string) {

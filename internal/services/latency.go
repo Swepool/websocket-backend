@@ -276,15 +276,7 @@ func (s *LatencyService) GetLatencyData() []models.LatencyData {
 	return result
 }
 
-// GetLatencyDataInterface returns current latency data as interface{} for the chart broadcaster
-func (s *LatencyService) GetLatencyDataInterface() []interface{} {
-	latencyData := s.GetLatencyData()
-	result := make([]interface{}, len(latencyData))
-	for i, data := range latencyData {
-		result[i] = data
-	}
-	return result
-}
+
 
 // GetLatencyForPair returns latency data for a specific chain pair
 func (s *LatencyService) GetLatencyForPair(sourceChain, destChain string) (models.LatencyData, bool) {

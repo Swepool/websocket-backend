@@ -77,24 +77,18 @@ func NewCoordinator(cfg config.Config) (*Coordinator, error) {
 	latencyService.SetCache(clickhouseService.GetCache())
 	nodeHealthService.SetCache(clickhouseService.GetCache())
 	
-	// Set latency service for initial client data
-	clickhouseService.SetLatencyService(latencyService)
-	
-	// Set node health service for initial client data
-	clickhouseService.SetNodeHealthService(nodeHealthService)
-	
 	// Create chart broadcaster for periodic chart data updates
-	chartBroadcaster := storage.NewChartBroadcaster(clickhouseService, broadcasterComponent, latencyService, nodeHealthService)
+	chartBroadcaster := storage.NewChartBroadcaster(clickhouseService, broadcasterComponent)
 	
 	utils.LogInfo("COORDINATOR", "Created clean modular pipeline:")
 	utils.LogInfo("COORDINATOR", "  → SyncManager: coordinates forward/backward sync")
 	utils.LogInfo("COORDINATOR", "  → Processor: normalizes and routes to WebSocket & database")
 	utils.LogInfo("COORDINATOR", "  → Batcher: accumulates for ClickHouse")
 	utils.LogInfo("COORDINATOR", "  → Broadcaster: WebSocket server")
-	utils.LogInfo("COORDINATOR", "  → ChartBroadcaster: periodic chart data with asset volumes + latency")
+	utils.LogInfo("COORDINATOR", "  → ChartBroadcaster: cache-first chart data broadcasting")
 	utils.LogInfo("COORDINATOR", "  → ChainsService: chain metadata monitoring")
-	utils.LogInfo("COORDINATOR", "  → LatencyService: cross-chain latency monitoring")
-	utils.LogInfo("COORDINATOR", "  → NodeHealthService: RPC node health monitoring")
+	utils.LogInfo("COORDINATOR", "  → LatencyService: cross-chain latency monitoring (→ cache)")
+	utils.LogInfo("COORDINATOR", "  → NodeHealthService: RPC node health monitoring (→ cache)")
 	
 	return &Coordinator{
 		syncManager:       syncManager,
