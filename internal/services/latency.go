@@ -255,6 +255,21 @@ func (s *LatencyService) GetLatencyData() []models.LatencyData {
 // GetLatencyDataInterface returns current latency data as interface{} for the chart broadcaster
 func (s *LatencyService) GetLatencyDataInterface() []interface{} {
 	latencyData := s.GetLatencyData()
+	utils.LogInfo("LATENCY_SERVICE", "🔍 GetLatencyDataInterface: Returning %d latency data points", len(latencyData))
+	
+	if len(latencyData) == 0 {
+		// Diagnose why we have no data
+		if s.chainsService == nil {
+			utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: chainsService is NIL")
+		} else {
+			chains := s.chainsService.GetAllChains()
+			utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: chainsService returned %d chains (need %d minimum)", len(chains), MinChainsForLatency)
+			if len(chains) == 0 {
+				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Chains service has 0 chains - likely GraphQL fetch failed")
+			}
+		}
+	}
+	
 	result := make([]interface{}, len(latencyData))
 	for i, data := range latencyData {
 		result[i] = data

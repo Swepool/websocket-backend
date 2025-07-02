@@ -142,11 +142,16 @@ func (s *ChainsService) refreshChains(ctx context.Context) error {
 		s.mu.Unlock()
 	}()
 	
+	utils.LogInfo("CHAINS_SERVICE", "🔍 Attempting to fetch chains from GraphQL API...")
+	
 	// Fetch chains from GraphQL API
 	graphqlChains, err := s.graphql.FetchChains(ctx)
 	if err != nil {
+		utils.LogError("CHAINS_SERVICE", "❌ GraphQL fetch failed: %v", err)
 		return err
 	}
+	
+	utils.LogInfo("CHAINS_SERVICE", "✅ GraphQL fetch successful: got %d chains", len(graphqlChains))
 	
 	// Convert to Chain format
 	chains := make([]models.Chain, len(graphqlChains))
