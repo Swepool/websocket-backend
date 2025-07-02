@@ -125,26 +125,21 @@ func (s *LatencyService) validateChainsForLatency(ctx context.Context) ([]models
 	if s.chainsService != nil {
 		chains := s.chainsService.GetAllChains()
 		if len(chains) >= MinChainsForLatency {
-			utils.LogInfo("LATENCY_SERVICE", "✅ Using %d chains from chains service cache", len(chains))
 			return chains, nil
 		}
-		utils.LogInfo("LATENCY_SERVICE", "⚠️ Chains service only has %d chains, fetching directly from GraphQL", len(chains))
 	}
 
-	// Fallback: fetch chains directly from GraphQL (like node health service does)
-	utils.LogInfo("LATENCY_SERVICE", "🔍 Fetching chains directly from GraphQL API...")
+	// Fallback: fetch chains directly from GraphQL
 	chains, err := s.graphql.FetchChains(ctx)
 	if err != nil {
-		utils.LogError("LATENCY_SERVICE", "❌ Failed to fetch chains from GraphQL: %v", err)
+		utils.LogError("LATENCY_SERVICE", "Failed to fetch chains from GraphQL: %v", err)
 		return []models.Chain{}, err
 	}
 
 	if len(chains) < MinChainsForLatency {
-		utils.LogWarn("LATENCY_SERVICE", "❌ Not enough chains for latency monitoring: %d < %d required", len(chains), MinChainsForLatency)
+		utils.LogWarn("LATENCY_SERVICE", "Not enough chains for latency monitoring: %d < %d required", len(chains), MinChainsForLatency)
 		return []models.Chain{}, nil
 	}
-
-	utils.LogInfo("LATENCY_SERVICE", "✅ Fetched %d chains directly from GraphQL", len(chains))
 	return chains, nil
 }
 
@@ -192,16 +187,13 @@ func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.Latency
 
 				if err != nil {
 					errorCount++
-					utils.LogWarn("LATENCY_SERVICE", "❌ Failed to fetch latency for %s -> %s: %v", source.DisplayName, dest.DisplayName, err)
+					utils.LogDebug("LATENCY_SERVICE", "Failed to fetch latency for %s -> %s: %v", source.DisplayName, dest.DisplayName, err)
 					return
 				}
 
 				if latency != nil {
 					latencyData = append(latencyData, *latency)
 					successCount++
-					utils.LogDebug("LATENCY_SERVICE", "✅ Got latency data for %s -> %s (median: %.2fs)", source.DisplayName, dest.DisplayName, latency.PacketAck.Median)
-				} else {
-					utils.LogDebug("LATENCY_SERVICE", "⚠️ No latency data returned for %s -> %s", source.DisplayName, dest.DisplayName)
 				}
 			}(sourceChain, destChain)
 		}
@@ -228,24 +220,18 @@ func (s *LatencyService) refreshLatencyData(ctx context.Context) {
 		latencyCtx, cancel := context.WithTimeout(ctx, LatencyFetchTimeout)
 		defer cancel()
 
-		utils.LogInfo("LATENCY_SERVICE", "🔍 Starting latency data refresh...")
-		
-		// Validation is now done inside FetchLatencyData with fallback to direct GraphQL fetch
-
 		latencyData, err := s.FetchLatencyData(latencyCtx)
 		if err != nil {
-			utils.LogError("LATENCY_SERVICE", "❌ Failed to fetch latency data: %v", err)
+			utils.LogError("LATENCY_SERVICE", "Failed to fetch latency data: %v", err)
 			return
 		}
-
-		utils.LogInfo("LATENCY_SERVICE", "🔍 Fetched %d latency data points", len(latencyData))
 		s.updateLatencyData(latencyData)
 
 		if s.latencyCallback != nil && len(latencyData) > 0 {
 			s.latencyCallback(latencyData)
-			utils.LogInfo("LATENCY_SERVICE", "✅ Updated latency data for %d chain pairs", len(latencyData))
+			utils.LogInfo("LATENCY_SERVICE", "Updated latency data for %d chain pairs", len(latencyData))
 		} else if len(latencyData) == 0 {
-			utils.LogWarn("LATENCY_SERVICE", "⚠️ No latency data fetched - this might be due to GraphQL API issues or no data available")
+			utils.LogWarn("LATENCY_SERVICE", "No latency data fetched - this might be due to GraphQL API issues or no data available")
 		}
 	}()
 }
@@ -272,9 +258,7 @@ func (s *LatencyService) updateLatencyData(latencyData []models.LatencyData) {
 		s.cache.SetWithTTL("latency_data", interfaceData, 6*time.Minute)
 		
 		if len(latencyData) > 0 {
-			utils.LogInfo("LATENCY_SERVICE", "✅ Cached %d latency data points with 6-minute TTL", len(latencyData))
-		} else {
-			utils.LogInfo("LATENCY_SERVICE", "✅ Cached empty latency data (prevents repeated failed fetches)")
+			utils.LogInfo("LATENCY_SERVICE", "Cached %d latency data points", len(latencyData))
 		}
 	}
 }
