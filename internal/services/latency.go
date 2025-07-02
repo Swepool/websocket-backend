@@ -11,7 +11,6 @@ import (
 
 // Constants for latency service
 const (
-	ChainsLoadDelay       = 5 * time.Second  // Wait time for chains service to load (reduced for faster cache population)
 	LatencyFetchTimeout   = 30 * time.Second // Timeout for latency data fetching
 	MinChainsForLatency   = 2                // Minimum chains needed for latency monitoring
 )
@@ -79,18 +78,8 @@ func (s *LatencyService) SetCache(cache CacheInterface) {
 func (s *LatencyService) Start(ctx context.Context) {
 	utils.LogInfo("LATENCY_SERVICE", "Starting latency monitoring service")
 
-	// Wait for chains to be loaded before starting latency monitoring
-	go func() {
-		timer := time.NewTimer(ChainsLoadDelay)
-		defer timer.Stop()
-		
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			s.refreshLatencyData(ctx)
-		}
-	}()
+	// Start immediately, but gracefully handle if chains aren't loaded yet
+	go s.refreshLatencyData(ctx)
 
 	ticker := time.NewTicker(s.config.CheckInterval)
 	defer ticker.Stop()
@@ -190,13 +179,16 @@ func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.Latency
 
 				if err != nil {
 					errorCount++
-					utils.LogWarn("LATENCY_SERVICE", "Failed to fetch latency for %s -> %s: %v", source.DisplayName, dest.DisplayName, err)
+					utils.LogWarn("LATENCY_SERVICE", "❌ Failed to fetch latency for %s -> %s: %v", source.DisplayName, dest.DisplayName, err)
 					return
 				}
 
 				if latency != nil {
 					latencyData = append(latencyData, *latency)
 					successCount++
+					utils.LogDebug("LATENCY_SERVICE", "✅ Got latency data for %s -> %s (median: %.2fs)", source.DisplayName, dest.DisplayName, latency.PacketAck.Median)
+				} else {
+					utils.LogDebug("LATENCY_SERVICE", "⚠️ No latency data returned for %s -> %s", source.DisplayName, dest.DisplayName)
 				}
 			}(sourceChain, destChain)
 		}
@@ -223,19 +215,31 @@ func (s *LatencyService) refreshLatencyData(ctx context.Context) {
 		latencyCtx, cancel := context.WithTimeout(ctx, LatencyFetchTimeout)
 		defer cancel()
 
-		latencyData, err := s.FetchLatencyData(latencyCtx)
-		if err != nil {
-			utils.LogError("LATENCY_SERVICE", "Failed to fetch latency data: %v", err)
+		utils.LogInfo("LATENCY_SERVICE", "🔍 Starting latency data refresh...")
+		
+		// Check chains first
+		chains := s.chainsService.GetAllChains()
+		utils.LogInfo("LATENCY_SERVICE", "🔍 Chains service has %d chains loaded", len(chains))
+		
+		if len(chains) < MinChainsForLatency {
+			utils.LogWarn("LATENCY_SERVICE", "❌ Not enough chains for latency monitoring: %d < %d required", len(chains), MinChainsForLatency)
 			return
 		}
 
+		latencyData, err := s.FetchLatencyData(latencyCtx)
+		if err != nil {
+			utils.LogError("LATENCY_SERVICE", "❌ Failed to fetch latency data: %v", err)
+			return
+		}
+
+		utils.LogInfo("LATENCY_SERVICE", "🔍 Fetched %d latency data points", len(latencyData))
 		s.updateLatencyData(latencyData)
 
 		if s.latencyCallback != nil && len(latencyData) > 0 {
 			s.latencyCallback(latencyData)
-			utils.LogInfo("LATENCY_SERVICE", "Updated latency data for %d chain pairs", len(latencyData))
+			utils.LogInfo("LATENCY_SERVICE", "✅ Updated latency data for %d chain pairs", len(latencyData))
 		} else if len(latencyData) == 0 {
-			utils.LogWarn("LATENCY_SERVICE", "No latency data fetched - chains may not be loaded yet")
+			utils.LogWarn("LATENCY_SERVICE", "⚠️ No latency data fetched - this might be due to GraphQL API issues or no data available")
 		}
 	}()
 }
@@ -252,14 +256,20 @@ func (s *LatencyService) updateLatencyData(latencyData []models.LatencyData) {
 	}
 	
 	// Cache the latency data for chart broadcaster (6-minute TTL to match other chart data)
-	if s.cache != nil && len(latencyData) > 0 {
+	// Cache even if we have 0 data points to avoid repeated failed fetches
+	if s.cache != nil {
 		// Convert to interface{} slice for cache storage
 		interfaceData := make([]interface{}, len(latencyData))
 		for i, data := range latencyData {
 			interfaceData[i] = data
 		}
 		s.cache.SetWithTTL("latency_data", interfaceData, 6*time.Minute)
-		utils.LogInfo("LATENCY_SERVICE", "✅ Cached %d latency data points with 6-minute TTL", len(latencyData))
+		
+		if len(latencyData) > 0 {
+			utils.LogInfo("LATENCY_SERVICE", "✅ Cached %d latency data points with 6-minute TTL", len(latencyData))
+		} else {
+			utils.LogInfo("LATENCY_SERVICE", "✅ Cached empty latency data (prevents repeated failed fetches)")
+		}
 	}
 }
 
@@ -275,8 +285,6 @@ func (s *LatencyService) GetLatencyData() []models.LatencyData {
 
 	return result
 }
-
-
 
 // GetLatencyForPair returns latency data for a specific chain pair
 func (s *LatencyService) GetLatencyForPair(sourceChain, destChain string) (models.LatencyData, bool) {

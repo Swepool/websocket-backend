@@ -153,6 +153,18 @@ func (s *ChainsService) refreshChains(ctx context.Context) error {
 	
 	utils.LogInfo("CHAINS_SERVICE", "✅ GraphQL fetch successful: got %d chains", len(graphqlChains))
 	
+	// Log some chain details for debugging
+	if len(graphqlChains) > 0 {
+		utils.LogInfo("CHAINS_SERVICE", "🔍 Sample chains: %s, %s", 
+			graphqlChains[0].DisplayName, 
+			func() string {
+				if len(graphqlChains) > 1 {
+					return graphqlChains[1].DisplayName
+				}
+				return "only 1 chain"
+			}())
+	}
+	
 	// Convert to Chain format
 	chains := make([]models.Chain, len(graphqlChains))
 	for i, chain := range graphqlChains {
