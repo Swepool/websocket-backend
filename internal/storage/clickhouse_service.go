@@ -59,8 +59,8 @@ func NewClickHouseService(config ClickHouseConfig) (*ClickHouseService, error) {
 			Method: clickhouse.CompressionLZ4,
 		},
 		DialTimeout:     15 * time.Second,
-		MaxOpenConns:    8,   // Increased for 16-core system (but still controlled)
-		MaxIdleConns:    4,   // Keep some idle connections for performance
+		MaxOpenConns:    12,  // Reasonable for serialized analytics + 2 fetchers
+		MaxIdleConns:    6,   // Keep some idle connections for performance
 		ConnMaxLifetime: 30 * time.Minute, // Shorter lifetime
 	}
 
@@ -489,7 +489,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		popularRoutes = []FrontendRouteData{} // Default to empty
 	}
 	
-	// Get popular routes for all timeframes (for timeScale data)
+	// Get popular routes for all timeframes (for timeScale data) - SERIALIZED to reduce concurrent connections
 	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
 	popularRoutesTimeScale := make(map[string][]FrontendRouteData)
 	for _, tf := range timeframes {
@@ -499,6 +499,8 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 			routes = []FrontendRouteData{}
 		}
 		popularRoutesTimeScale[tf] = routes
+		// Small delay to prevent connection pool exhaustion
+		time.Sleep(10 * time.Millisecond)
 	}
 	
 	// Get chain flow data for default timeframe (last day)
@@ -518,7 +520,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: Got chain flow data with %d chains", len(chainFlowData.Chains))
 	}
 	
-	// Get chain flow data for all timeframes (for timeScale data)
+	// Get chain flow data for all timeframes (for timeScale data) - SERIALIZED
 	chainFlowTimeScale := make(map[string][]FrontendChainData)
 	for _, tf := range timeframes {
 		chainData, err := c.GetChainFlowData(ctx, tf)
@@ -528,6 +530,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		} else {
 			chainFlowTimeScale[tf] = chainData.Chains
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	
 	// Update chain flow data with timeScale
@@ -557,6 +560,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 			senders = []FrontendWalletData{}
 		}
 		activeSendersTimeScale[tf] = senders
+		time.Sleep(10 * time.Millisecond)
 		
 		receivers, err := c.GetTopReceivers(ctx, 10, tf)
 		if err != nil {
@@ -564,6 +568,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 			receivers = []FrontendWalletData{}
 		}
 		activeReceiversTimeScale[tf] = receivers
+		time.Sleep(10 * time.Millisecond)
 	}
 	
 	// Get asset volume data for initial client connections
@@ -582,7 +587,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		}
 	}
 
-	// Get asset volume data for all timeframes (for timeScale data)
+	// Get asset volume data for all timeframes (for timeScale data) - SERIALIZED
 	// timeframes already declared above
 	assetVolumeTimeScale := make(map[string][]FrontendAsset)
 	for _, tf := range timeframes {
@@ -593,6 +598,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		} else {
 			assetVolumeTimeScale[tf] = assetData.Assets
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Update asset volume data with timeScale
