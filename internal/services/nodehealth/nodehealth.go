@@ -95,9 +95,12 @@ func (s *Service) Start(ctx context.Context) {
 	utils.LogInfo("NODE_HEALTH", "Starting node health service")
 	
 	// Initial health check with timeout
+	utils.LogInfo("NODE_HEALTH", "🔍 Starting initial health checks...")
 	checkCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	if err := s.performHealthChecks(checkCtx); err != nil {
-		utils.LogError("NODE_HEALTH", "Failed to perform initial health checks: %v", err)
+		utils.LogError("NODE_HEALTH", "❌ Failed to perform initial health checks: %v", err)
+	} else {
+		utils.LogInfo("NODE_HEALTH", "✅ Initial health checks completed successfully")
 	}
 	cancel()
 	
@@ -109,9 +112,12 @@ func (s *Service) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			utils.LogInfo("NODE_HEALTH", "🔄 Running periodic health check (every 4 minutes)...")
 			checkCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			if err := s.performHealthChecks(checkCtx); err != nil {
-				utils.LogError("NODE_HEALTH", "Failed to perform health checks: %v", err)
+				utils.LogError("NODE_HEALTH", "❌ Failed to perform periodic health checks: %v", err)
+			} else {
+				utils.LogInfo("NODE_HEALTH", "✅ Periodic health check completed successfully")
 			}
 			cancel()
 		}
@@ -120,13 +126,17 @@ func (s *Service) Start(ctx context.Context) {
 
 // performHealthChecks fetches chains and checks all RPC endpoints
 func (s *Service) performHealthChecks(ctx context.Context) error {
-	utils.LogInfo("NODE_HEALTH", "Starting health checks")
+	utils.LogInfo("NODE_HEALTH", "🔍 Starting health checks...")
 	
 	// Fetch chains with RPCs
+	utils.LogInfo("NODE_HEALTH", "🔍 Fetching chains from GraphQL API...")
 	chains, err := s.graphql.FetchChainsWithRpcs(ctx)
 	if err != nil {
+		utils.LogError("NODE_HEALTH", "❌ Failed to fetch chains from GraphQL: %v", err)
 		return fmt.Errorf("failed to fetch chains: %w", err)
 	}
+	
+	utils.LogInfo("NODE_HEALTH", "✅ Fetched %d chains from GraphQL", len(chains))
 	
 	// Count total RPC endpoints (excluding GRPC/REST)
 	totalEndpoints := 0
@@ -198,8 +208,17 @@ func (s *Service) performHealthChecks(ctx context.Context) error {
 		utils.LogInfo("NODE_HEALTH", "Triggered health callback with %d nodes", len(healthData))
 	}
 	
-	utils.LogInfo("NODE_HEALTH", "Completed health checks for %d nodes: %d healthy, %d degraded, %d unhealthy", 
+	utils.LogInfo("NODE_HEALTH", "✅ Completed health checks for %d nodes: %d healthy, %d degraded, %d unhealthy", 
 		len(healthData), healthy, degraded, unhealthy)
+	
+	// Log more details for debugging
+	if len(healthData) == 0 {
+		utils.LogWarn("NODE_HEALTH", "⚠️ No health data collected - all RPC endpoints may have failed")
+	} else {
+		utils.LogInfo("NODE_HEALTH", "🔍 Health check details: %d total endpoints checked, %d actual RPC endpoints", 
+			totalEndpoints, actualRpcCount)
+	}
+	
 	return nil
 }
 
@@ -642,11 +661,17 @@ func (s *Service) updateHealthData(healthData []models.NodeHealthData) {
 	}
 	
 	// Cache the health summary data for chart broadcaster (6-minute TTL to match other chart data)
-	if s.cache != nil && len(healthData) > 0 {
+	// Cache even if we have 0 health data points to avoid repeated failed checks
+	if s.cache != nil {
 		// Get the summary object that the frontend expects
 		summary := s.getHealthSummaryInternal() // Use internal method to avoid double-locking
 		s.cache.SetWithTTL("node_health_data", summary, 6*time.Minute)
-		utils.LogInfo("NODE_HEALTH", "✅ Cached node health summary data with 6-minute TTL (%d total nodes)", len(healthData))
+		
+		if len(healthData) > 0 {
+			utils.LogInfo("NODE_HEALTH", "✅ Cached node health summary data with 6-minute TTL (%d total nodes)", len(healthData))
+		} else {
+			utils.LogInfo("NODE_HEALTH", "✅ Cached empty node health data (prevents repeated failed checks)")
+		}
 	}
 }
 
