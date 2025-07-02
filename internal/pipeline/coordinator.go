@@ -312,14 +312,17 @@ func (c *Coordinator) startChartUpdates(ctx context.Context) {
 	utils.LogInfo("COORDINATOR", "Starting immediate-broadcast chart updates (2 minute cycle)")
 	
 	// Initial update - populate both groups and broadcast immediately
-	utils.LogInfo("COORDINATOR", "Initial chart group A update")
+	utils.LogInfo("COORDINATOR", "🟢 INITIAL: Starting Group A update...")
 	c.chartBroadcaster.UpdateChartGroupA(ctx)
+	utils.LogInfo("COORDINATOR", "🟢 INITIAL: Group A completed, broadcasting...")
 	c.broadcastChartUpdate(ctx) // Immediate broadcast after cache update
 	
+	utils.LogInfo("COORDINATOR", "⏳ INITIAL: Waiting 30 seconds before Group B...")
 	time.Sleep(30 * time.Second) // Brief delay between initial groups
 	
-	utils.LogInfo("COORDINATOR", "Initial chart group B update")
+	utils.LogInfo("COORDINATOR", "🟡 INITIAL: Starting Group B update...")
 	c.chartBroadcaster.UpdateChartGroupB(ctx)
+	utils.LogInfo("COORDINATOR", "🟡 INITIAL: Group B completed, broadcasting...")
 	c.broadcastChartUpdate(ctx) // Immediate broadcast after cache update
 	
 	// Update chart groups every 2 minutes, alternating, with immediate broadcasts

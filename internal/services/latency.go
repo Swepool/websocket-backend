@@ -28,9 +28,9 @@ type LatencyConfig struct {
 func DefaultLatencyConfig() LatencyConfig {
 	return LatencyConfig{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  10 * time.Minute, // Reduced from 2min to avoid rate limiting
-		RequestTimeout: 5 * time.Second,
-		MaxConcurrency: 10,
+		CheckInterval:  15 * time.Minute, // Further reduced to avoid rate limiting
+		RequestTimeout: 10 * time.Second, // Increased timeout for slower requests
+		MaxConcurrency: 3,  // Much more conservative - only 3 concurrent requests
 	}
 }
 
@@ -162,6 +162,9 @@ func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.Latency
 				s.semaphore <- struct{}{}
 				defer func() { <-s.semaphore }()
 
+				// Add delay between requests to avoid rate limiting
+				time.Sleep(100 * time.Millisecond)
+
 				// Check context cancellation before each request
 				select {
 				case <-ctx.Done():
@@ -267,7 +270,8 @@ func (s *LatencyService) GetLatencyDataInterface() []interface{} {
 				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Not enough chains (%d chains, need %d minimum)", len(chains), MinChainsForLatency)
 			} else {
 				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Have %d chains (sufficient), but latency data map is empty - likely due to GraphQL rate limiting", len(chains))
-				utils.LogError("LATENCY_SERVICE", "💡 SOLUTION: Latency fetches are probably failing due to HTTP 429 rate limits")
+				utils.LogError("LATENCY_SERVICE", "💡 SOLUTION: Using conservative settings (3 concurrent, 15min interval, 100ms delays) to avoid HTTP 429 errors")
+				utils.LogError("LATENCY_SERVICE", "🕐 TIMING: Next latency fetch will happen in 15 minutes - please wait for rate limits to reset")
 			}
 		}
 	}
