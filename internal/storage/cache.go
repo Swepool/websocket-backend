@@ -260,9 +260,9 @@ type CacheConfig struct {
 // DefaultCacheConfig returns sensible default cache configuration
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
-		TransferRatesTTL:     6 * time.Minute,   // Updated every 2 minutes, cache for 6 minutes
-		ActiveWalletsTTL:     6 * time.Minute,   // Updated every 2 minutes, cache for 6 minutes
-		PopularRoutesTTL:     6 * time.Minute,   // Updated every 2 minutes, cache for 6 minutes
+		TransferRatesTTL:     6 * time.Minute,   // Updated every 2 minutes (1min alternating), cache for 6 minutes
+		ActiveWalletsTTL:     6 * time.Minute,   // Updated every 2 minutes (1min alternating), cache for 6 minutes
+		PopularRoutesTTL:     6 * time.Minute,   // Updated every 2 minutes (1min alternating), cache for 6 minutes
 		ChartDataTTL:         6 * time.Minute,   // Combined chart data, cache for 6 minutes
 		DefaultTTL:           6 * time.Minute,   // Default for chart data types
 	}

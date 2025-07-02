@@ -307,7 +307,7 @@ func (c *Coordinator) Health(ctx context.Context) map[string]interface{} {
 
 // startChartUpdates handles periodic chart data updates with immediate broadcasting
 func (c *Coordinator) startChartUpdates(ctx context.Context) {
-	utils.LogInfo("COORDINATOR", "Starting immediate-broadcast chart updates (2 minute cycle)")
+	utils.LogInfo("COORDINATOR", "Starting immediate-broadcast chart updates (1 minute alternating = 2 minute per group cycle)")
 	
 	// Initial update - populate both groups and broadcast immediately
 	utils.LogInfo("COORDINATOR", "🟢 INITIAL: Starting Group A update...")
@@ -323,8 +323,8 @@ func (c *Coordinator) startChartUpdates(ctx context.Context) {
 	utils.LogInfo("COORDINATOR", "🟡 INITIAL: Group B completed, broadcasting...")
 	c.broadcastChartUpdate(ctx) // Immediate broadcast after cache update
 	
-	// Update chart groups every 2 minutes, alternating, with immediate broadcasts
-	updateTicker := time.NewTicker(2 * time.Minute)
+	// Update chart groups every 1 minutes, alternating, with immediate broadcasts
+	updateTicker := time.NewTicker(1 * time.Minute)
 	defer updateTicker.Stop()
 	
 	isGroupA := true // Start with Group A on first update cycle
@@ -335,14 +335,14 @@ func (c *Coordinator) startChartUpdates(ctx context.Context) {
 			utils.LogInfo("COORDINATOR", "Chart updates stopping")
 			return
 		case <-updateTicker.C:
-			// Update one chart group every 2 minutes and broadcast immediately
+			// Update one chart group every 1 minute (so each group updates every 2 minutes)
 			if isGroupA {
-				utils.LogInfo("COORDINATOR", "Updating chart group A (rates, routes, chains)")
+				utils.LogInfo("COORDINATOR", "Updating chart group A (rates, routes, chains) - every 2min cycle")
 				c.chartBroadcaster.UpdateChartGroupA(ctx)
 				utils.LogInfo("COORDINATOR", "Broadcasting fresh chart data immediately after group A update")
 				c.broadcastChartUpdate(ctx) // Immediate broadcast with fresh cache data
 			} else {
-				utils.LogInfo("COORDINATOR", "Updating chart group B (assets, senders, receivers)")
+				utils.LogInfo("COORDINATOR", "Updating chart group B (assets, senders, receivers) - every 2min cycle")
 				c.chartBroadcaster.UpdateChartGroupB(ctx)
 				utils.LogInfo("COORDINATOR", "Broadcasting fresh chart data immediately after group B update")
 				c.broadcastChartUpdate(ctx) // Immediate broadcast with fresh cache data
