@@ -264,30 +264,24 @@ func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
 		}
 	}
 	
-	// Get latency data
+	// Get latency data from cache ONLY (no direct service calls)
 	var latencyData []interface{}
-	if cb.latencyService != nil {
-		latencyData = cb.latencyService.GetLatencyDataInterface()
-		utils.LogInfo("CHART_BROADCASTER", "🔍 LATENCY DEBUG: Retrieved %d latency data points", len(latencyData))
+	if data, hit := cache.Get("latency_data"); hit {
+		latencyData = data.([]interface{})
+		utils.LogInfo("CHART_BROADCASTER", "✅ Latency data cache HIT: %d data points", len(latencyData))
 	} else {
-		utils.LogWarn("CHART_BROADCASTER", "⚠️  No latency service available")
-		latencyData = []interface{}{}
+		utils.LogWarn("CHART_BROADCASTER", "❌ Latency data cache MISS - using empty data")
+		latencyData = []interface{}{} // Safe fallback
 	}
 	
-	// Get node health data
+	// Get node health data from cache ONLY (no direct service calls)
 	var nodeHealthData interface{}
-	if cb.nodeHealthService != nil {
-		// Get the summary object directly, not as an array
-		if healthDataArray := cb.nodeHealthService.GetHealthDataInterface(); len(healthDataArray) > 0 {
-			nodeHealthData = healthDataArray[0] // Extract the first (and only) summary object
-			utils.LogInfo("CHART_BROADCASTER", "🔍 NODE HEALTH DEBUG: Retrieved node health summary data")
-		} else {
-			nodeHealthData = nil
-			utils.LogWarn("CHART_BROADCASTER", "⚠️  No node health data available")
-		}
+	if data, hit := cache.Get("node_health_data"); hit {
+		nodeHealthData = data
+		utils.LogInfo("CHART_BROADCASTER", "✅ Node health data cache HIT")
 	} else {
-		utils.LogWarn("CHART_BROADCASTER", "⚠️  No node health service available")
-		nodeHealthData = nil
+		utils.LogWarn("CHART_BROADCASTER", "❌ Node health data cache MISS - using empty data")
+		nodeHealthData = nil // Safe fallback
 	}
 	
 	// Build comprehensive chart data payload

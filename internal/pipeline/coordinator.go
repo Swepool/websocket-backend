@@ -73,6 +73,10 @@ func NewCoordinator(cfg config.Config) (*Coordinator, error) {
 	latencyService := services.NewLatencyService(services.DefaultLatencyConfig(), chainsService)
 	nodeHealthService := nodehealth.NewService(nodehealth.DefaultNodeHealthConfig())
 	
+	// Connect services to cache for storing their data
+	latencyService.SetCache(clickhouseService.GetCache())
+	nodeHealthService.SetCache(clickhouseService.GetCache())
+	
 	// Set latency service for initial client data
 	clickhouseService.SetLatencyService(latencyService)
 	

@@ -43,6 +43,11 @@ func DefaultNodeHealthConfig() Config {
 // HealthUpdateCallback is called when health data is updated
 type HealthUpdateCallback func([]models.NodeHealthData)
 
+// CacheInterface defines the interface for caching health data
+type CacheInterface interface {
+	SetWithTTL(key string, data interface{}, ttl time.Duration)
+}
+
 // Service manages node health checking
 type Service struct {
 	config          Config
@@ -52,6 +57,7 @@ type Service struct {
 	httpClient      *http.Client
 	healthCallback  HealthUpdateCallback
 	semaphore       chan struct{} // For limiting concurrent checks
+	cache           CacheInterface // Cache interface for storing health data
 }
 
 // NewService creates a new node health service
@@ -77,6 +83,11 @@ func NewService(config Config) *Service {
 // SetHealthCallback sets the callback function for health updates
 func (s *Service) SetHealthCallback(callback HealthUpdateCallback) {
 	s.healthCallback = callback
+}
+
+// SetCache sets the cache interface for storing health data
+func (s *Service) SetCache(cache CacheInterface) {
+	s.cache = cache
 }
 
 // Start begins the node health service
@@ -619,7 +630,7 @@ func (s *Service) performJsonRpcCall(ctx context.Context, rpcURL string, reqBody
 	return nil
 }
 
-// updateHealthData updates the stored health data atomically
+// updateHealthData updates the stored health data atomically and caches it
 func (s *Service) updateHealthData(healthData []models.NodeHealthData) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -628,6 +639,14 @@ func (s *Service) updateHealthData(healthData []models.NodeHealthData) {
 	s.healthData = make(map[string]models.NodeHealthData)
 	for _, data := range healthData {
 		s.healthData[data.RpcURL] = data // URL is unique identifier
+	}
+	
+	// Cache the health summary data for chart broadcaster (6-minute TTL to match other chart data)
+	if s.cache != nil && len(healthData) > 0 {
+		// Get the summary object that the frontend expects
+		summary := s.getHealthSummaryInternal() // Use internal method to avoid double-locking
+		s.cache.SetWithTTL("node_health_data", summary, 6*time.Minute)
+		utils.LogInfo("NODE_HEALTH", "✅ Cached node health summary data with 6-minute TTL (%d total nodes)", len(healthData))
 	}
 }
 
@@ -765,6 +784,11 @@ func (s *Service) GetHealthSummary() interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	
+	return s.getHealthSummaryInternal()
+}
+
+// getHealthSummaryInternal returns health summary without acquiring locks (for internal use)
+func (s *Service) getHealthSummaryInternal() interface{} {
 	// Convert health data to interface{} array for nodesWithRpcs
 	nodesWithRpcs := make([]interface{}, 0, len(s.healthData))
 	for _, data := range s.healthData {

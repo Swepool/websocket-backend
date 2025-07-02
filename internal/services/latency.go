@@ -46,6 +46,12 @@ type LatencyService struct {
 	mu              sync.RWMutex
 	latencyCallback LatencyUpdateCallback
 	semaphore       chan struct{} // For limiting concurrent checks
+	cache           CacheInterface // Cache interface for storing latency data
+}
+
+// CacheInterface defines the interface for caching latency data
+type CacheInterface interface {
+	SetWithTTL(key string, data interface{}, ttl time.Duration)
 }
 
 // NewLatencyService creates a new latency monitoring service
@@ -62,6 +68,11 @@ func NewLatencyService(config LatencyConfig, chainsService *ChainsService) *Late
 // SetLatencyCallback sets the callback function for latency updates
 func (s *LatencyService) SetLatencyCallback(callback LatencyUpdateCallback) {
 	s.latencyCallback = callback
+}
+
+// SetCache sets the cache interface for storing latency data
+func (s *LatencyService) SetCache(cache CacheInterface) {
+	s.cache = cache
 }
 
 // Start begins the latency monitoring service
@@ -229,7 +240,7 @@ func (s *LatencyService) refreshLatencyData(ctx context.Context) {
 	}()
 }
 
-// updateLatencyData updates the stored latency data atomically
+// updateLatencyData updates the stored latency data atomically and caches it
 func (s *LatencyService) updateLatencyData(latencyData []models.LatencyData) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,6 +249,17 @@ func (s *LatencyService) updateLatencyData(latencyData []models.LatencyData) {
 	for _, data := range latencyData {
 		key := s.generateLatencyKey(data.SourceChain, data.DestinationChain)
 		s.latencyData[key] = data
+	}
+	
+	// Cache the latency data for chart broadcaster (6-minute TTL to match other chart data)
+	if s.cache != nil && len(latencyData) > 0 {
+		// Convert to interface{} slice for cache storage
+		interfaceData := make([]interface{}, len(latencyData))
+		for i, data := range latencyData {
+			interfaceData[i] = data
+		}
+		s.cache.SetWithTTL("latency_data", interfaceData, 6*time.Minute)
+		utils.LogInfo("LATENCY_SERVICE", "✅ Cached %d latency data points with 6-minute TTL", len(latencyData))
 	}
 }
 

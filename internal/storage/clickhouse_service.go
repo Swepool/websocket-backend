@@ -109,6 +109,11 @@ func (c *ClickHouseService) SetNodeHealthService(nodeHealthService NodeHealthSer
 	c.nodeHealthService = nodeHealthService
 }
 
+// GetCache returns the cache instance for external services to use
+func (c *ClickHouseService) GetCache() *ChartDataCache {
+	return c.cache
+}
+
 // InitializeSchema creates the ClickHouse tables and views
 func (c *ClickHouseService) InitializeSchema(ctx context.Context) error {
 	utils.LogInfo("CLICKHOUSE", "Initializing ClickHouse schema...")
@@ -1600,11 +1605,6 @@ func (c *ClickHouseService) getAssetTopRoutes(ctx context.Context, assetSymbol, 
 	}
 
 	return routes
-}
-
-// GetCache returns the cache instance for direct access (used by chart broadcaster for pure cache-first reads)
-func (c *ClickHouseService) GetCache() *ChartDataCache {
-	return c.cache
 }
 
  
