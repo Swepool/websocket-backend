@@ -14,6 +14,7 @@ type Transfer struct {
 	// Amount and token
 	BaseAmount      string `json:"base_amount"`
 	BaseTokenSymbol string `json:"base_token_symbol"`
+	BaseDenom       string `json:"base_denom"`
 	
 	// Canonical token for asset tracking (normalized across wrapping/unwrapping)
 	CanonicalTokenSymbol string `json:"canonical_token_symbol"`

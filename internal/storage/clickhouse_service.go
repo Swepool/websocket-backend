@@ -181,12 +181,13 @@ func (c *ClickHouseService) InsertTransfers(ctx context.Context, transfers []mod
 		return nil
 	}
 
-	// Prepare batch insert using existing schema (no base_token field)
+	// Prepare batch insert with denomination fields
 	batch, err := c.conn.PrepareBatch(ctx, `
 		INSERT INTO transfers_analytics (
 			id, packet_hash, sort_order, source_chain, dest_chain, source_name, dest_name,
-			sender, receiver, amount, token_symbol, canonical_token_symbol, timestamp, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			sender, receiver, amount, token_symbol, canonical_token_symbol, 
+			base_denom, unwrapped_denom, wrapped_denom, timestamp, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
@@ -198,6 +199,13 @@ func (c *ClickHouseService) InsertTransfers(ctx context.Context, transfers []mod
 
 		// Parse amount safely
 		amount := parseAmount(transfer.BaseAmount)
+
+		// Extract denomination info from wrapping data
+		var unwrappedDenom, wrappedDenom string
+		if len(transfer.BaseWrapping) > 0 {
+			unwrappedDenom = transfer.BaseWrapping[0].UnwrappedDenom
+			wrappedDenom = transfer.BaseWrapping[0].WrappedDenom
+		}
 
 		err := batch.Append(
 			id,
@@ -212,6 +220,9 @@ func (c *ClickHouseService) InsertTransfers(ctx context.Context, transfers []mod
 			amount,
 			transfer.BaseTokenSymbol,      // Display symbol
 			transfer.CanonicalTokenSymbol, // Now properly calculated in GraphQL client
+			transfer.BaseDenom,            // Primary denomination identifier
+			unwrappedDenom,               // From wrapping metadata
+			wrappedDenom,                 // From wrapping metadata
 			transfer.TransferSendTimestamp,
 			time.Now(),
 		)
@@ -1396,16 +1407,12 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 			timeframe, totalTransfersInTimeframe, uniqueAssetsInTimeframe)
 	}
 	
-	// Query: Use existing canonical_token_symbol logic, group internally, return frontend-friendly names
-	// This approach requires NO schema changes and leverages existing canonical logic
+	// Query: Use proper denomination for grouping (unique identifier), not symbol (display name)
+	// Priority: base_denom > unwrapped_denom > wrapped_denom > canonical_token_symbol > token_symbol
 	query := fmt.Sprintf(`
 		SELECT 
-			CASE 
-				WHEN canonical_token_symbol != '' AND canonical_token_symbol IS NOT NULL 
-				THEN canonical_token_symbol 
-				ELSE token_symbol 
-			END as internal_asset_id,
-			-- Use the most common display symbol for this asset group
+			coalesce(nullif(base_denom, ''), nullif(unwrapped_denom, ''), nullif(wrapped_denom, ''), canonical_token_symbol, token_symbol) as asset_denom,
+			-- Use token_symbol for display (human readable name)
 			any(token_symbol) as asset_symbol,
 			any(token_symbol) as asset_name,
 			count() as transfer_count,
@@ -1418,11 +1425,7 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 		  AND token_symbol != ''
 		  AND token_symbol IS NOT NULL
 		GROUP BY 
-			CASE 
-				WHEN canonical_token_symbol != '' AND canonical_token_symbol IS NOT NULL 
-				THEN canonical_token_symbol 
-				ELSE token_symbol 
-			END
+			coalesce(nullif(base_denom, ''), nullif(unwrapped_denom, ''), nullif(wrapped_denom, ''), canonical_token_symbol, token_symbol)
 		ORDER BY transfer_count DESC
 		LIMIT 20
 	`, interval)
@@ -1442,12 +1445,12 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 
 	for rows.Next() {
 		var asset FrontendAsset
-		var internalAssetID string
+		var assetDenom string
 		var transferCount uint64
 		var lastActivity time.Time
 		
 		err := rows.Scan(
-			&internalAssetID, &asset.AssetSymbol, &asset.AssetName, &transferCount,
+			&assetDenom, &asset.AssetSymbol, &asset.AssetName, &transferCount,
 			&asset.TotalVolume, &asset.LargestTransfer, &asset.AverageAmount, &lastActivity,
 		)
 		if err != nil {
@@ -1458,18 +1461,18 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 		asset.TransferCount = int64(transferCount)
 		asset.LastActivity = lastActivity.Format("2006-01-02 15:04:05")
 		
-		// Get top routes for this asset (using the internal asset ID for proper filtering)
-		asset.TopRoutes = c.getAssetTopRoutes(ctx, internalAssetID, timeframe)
+		// Get top routes for this asset (using the denomination for proper filtering)
+		asset.TopRoutes = c.getAssetTopRoutes(ctx, assetDenom, timeframe)
 		
 		assets = append(assets, asset)
 		totalVolume += asset.TotalVolume
 		totalTransfers += asset.TransferCount
 		rowCount++
 		
-		// Enhanced debugging - show internal vs display names
+		// Enhanced debugging - show denomination vs display names
 		if rowCount <= 3 {
-			utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: [%s] Asset #%d: %s (internal: %s, display: %s, count=%d, vol=%.2f)", 
-				timeframe, rowCount, asset.AssetSymbol, internalAssetID, asset.AssetName, asset.TransferCount, asset.TotalVolume)
+			utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: [%s] Asset #%d: %s (denom: %s, display: %s, count=%d, vol=%.2f)", 
+				timeframe, rowCount, asset.AssetSymbol, assetDenom, asset.AssetName, asset.TransferCount, asset.TotalVolume)
 		}
 	}
 
@@ -1519,7 +1522,7 @@ func (c *ClickHouseService) getAssetTopRoutes(ctx context.Context, assetSymbol, 
 	// Add debug logging to trace asset symbol filtering
 	utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: Querying routes for asset '%s' in timeframe %s", assetSymbol, timeframe)
 	
-	// Query routes for this asset using existing canonical_token_symbol logic (no schema changes needed)
+	// Query routes for this asset using proper denomination matching (not symbol)
 	query := fmt.Sprintf(`
 		SELECT 
 			source_chain as from_chain,
@@ -1531,15 +1534,11 @@ func (c *ClickHouseService) getAssetTopRoutes(ctx context.Context, assetSymbol, 
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
 		WHERE timestamp >= now() - INTERVAL %s
-		  AND (
-		    (canonical_token_symbol != '' AND canonical_token_symbol IS NOT NULL AND canonical_token_symbol = '%s')
-		    OR 
-		    ((canonical_token_symbol = '' OR canonical_token_symbol IS NULL) AND token_symbol = '%s')
-		  )
+		  AND coalesce(nullif(base_denom, ''), nullif(unwrapped_denom, ''), nullif(wrapped_denom, ''), canonical_token_symbol, token_symbol) = '%s'
 		GROUP BY source_chain, dest_chain, source_name, dest_name
 		ORDER BY route_count DESC
 		LIMIT 10
-	`, interval, assetSymbol, assetSymbol)
+	`, interval, assetSymbol)
 
 	rows, err := c.conn.Query(ctx, query)
 	if err != nil {

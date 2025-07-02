@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS transfers_analytics (
     amount Float64,
     token_symbol String,
     canonical_token_symbol String,
+    base_denom String,
+    unwrapped_denom String,
+    wrapped_denom String,
     timestamp DateTime('UTC'),
     created_at DateTime('UTC'),
     
@@ -195,11 +198,11 @@ AS SELECT
 FROM transfers_analytics
 GROUP BY source_chain, dest_chain, source_name, dest_name, route, day;
 
--- Real-time token analytics
+-- Real-time token analytics (group by proper denomination, not symbol)
 CREATE MATERIALIZED VIEW IF NOT EXISTS token_analytics_mv
 TO token_analytics
 AS SELECT
-    coalesce(canonical_token_symbol, token_symbol) as token,
+    coalesce(nullif(base_denom, ''), nullif(unwrapped_denom, ''), nullif(wrapped_denom, ''), canonical_token_symbol, token_symbol) as token,
     toDate(timestamp) as day,
     count() as transfer_count,
     sum(amount) as total_volume,
