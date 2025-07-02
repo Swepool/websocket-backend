@@ -655,42 +655,8 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 		return data.(map[string]interface{}), true
 	}
 	
-	utils.LogDebug("CACHE", "Cache miss for chart_data_frontend (cache-only) - building empty response")
-	
-	// Cache miss - return empty data structure instead of triggering database queries
-	chartData := map[string]interface{}{
-		"currentRates":             &FrontendTransferRates{},
-		"activeWalletRates":        &ActiveWalletRates{},
-		"popularRoutes":            []FrontendRouteData{},
-		"popularRoutesTimeScale":   make(map[string][]FrontendRouteData),
-		"activeSenders":            []FrontendWalletData{},
-		"activeReceivers":          []FrontendWalletData{},
-		"activeSendersTimeScale":   make(map[string][]FrontendWalletData),
-		"activeReceiversTimeScale": make(map[string][]FrontendWalletData),
-		"chainFlowData": &FrontendChainFlowData{
-			Chains:              []FrontendChainData{},
-			ChainFlowTimeScale:  make(map[string][]FrontendChainData),
-			TotalOutgoing:       0,
-			TotalIncoming:       0,
-			ServerUptimeSeconds: 0,
-		},
-		"assetVolumeData": &FrontendAssetVolumeData{
-			Assets:               []FrontendAsset{},
-			AssetVolumeTimeScale: make(map[string][]FrontendAsset),
-			TotalAssets:          0,
-			TotalVolume:          0,
-			TotalTransfers:       0,
-			ServerUptimeSeconds:  0,
-		},
-		"latencyData":    []interface{}{},
-		"nodeHealthData": nil,
-		"lastUpdated":    time.Now().Format("2006-01-02 15:04:05"),
-		"dataSource":     "cache_only",
-		"cached":         false,
-		"empty":          true, // Indicate this is empty data
-	}
-	
-	return chartData, false // false = cache miss, empty data returned
+	utils.LogDebug("CACHE", "Cache miss for chart_data_frontend (cache-only) - no data returned")
+	return nil, false // Cache miss - return nil instead of empty structures
 }
 
 // GetPopularRoutes gets the most popular transfer routes with caching

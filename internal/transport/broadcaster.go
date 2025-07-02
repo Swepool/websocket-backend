@@ -824,7 +824,8 @@ func (sb *Broadcaster) sendInitialChartData(client *Client) {
 		chartData, cacheHit := chartService.GetChartDataForFrontendCacheOnly()
 		
 		if !cacheHit {
-			utils.LogInfo("SHARDED_BROADCASTER", "Cache miss for client %s - sending empty initial data (will get real data on next broadcast)", client.id)
+			utils.LogInfo("SHARDED_BROADCASTER", "Cache miss for client %s - skipping initial data (will get real data on next broadcast)", client.id)
+			return // Don't send empty data, wait for next broadcast cycle
 		}
 		
 		// Wrap chart data in the same format as regular broadcasts
@@ -852,11 +853,7 @@ func (sb *Broadcaster) sendInitialChartData(client *Client) {
 		// Send directly to the specific client with timeout to prevent hanging
 		select {
 		case client.send <- data:
-			if cacheHit {
-				utils.LogInfo("SHARDED_BROADCASTER", "Sent cached initial chart data to client %s", client.id)
-			} else {
-				utils.LogInfo("SHARDED_BROADCASTER", "Sent empty initial chart data to client %s (cache miss)", client.id)
-			}
+			utils.LogInfo("SHARDED_BROADCASTER", "Sent cached initial chart data to client %s", client.id)
 		case <-time.After(100 * time.Millisecond):
 			utils.LogWarn("SHARDED_BROADCASTER", "Timeout sending initial chart data to client %s", client.id)
 		default:
