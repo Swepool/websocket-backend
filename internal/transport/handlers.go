@@ -1,9 +1,7 @@
 package transport
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 	"websocket-backend/internal/utils"
@@ -367,106 +365,7 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleAssetVolumeDebug provides debugging tools for asset volume timeframe issues
-func (s *Server) handleAssetVolumeDebug(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
-	clickhouseService := s.coordinator.GetClickHouseService()
-	
-	// Force clear asset volume cache to get fresh data
-	if r.URL.Query().Get("clear_cache") == "true" {
-		clickhouseService.ClearAssetVolumeCache()
-	}
-	
-	// Get asset volume data for all timeframes
-	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
-	response := map[string]interface{}{
-		"timestamp": time.Now(),
-		"timeframes": make(map[string]interface{}),
-	}
-	
-	for _, tf := range timeframes {
-		assetData, err := clickhouseService.GetAssetVolumesFresh(context.Background(), tf)
-		if err != nil {
-			response["timeframes"].(map[string]interface{})[tf] = map[string]interface{}{
-				"error": err.Error(),
-				"count": 0,
-			}
-		} else {
-			topAssets := []string{}
-			for i, asset := range assetData.Assets {
-				if i < 3 {
-					topAssets = append(topAssets, fmt.Sprintf("%s(%d)", asset.AssetSymbol, asset.TransferCount))
-				}
-			}
-			response["timeframes"].(map[string]interface{})[tf] = map[string]interface{}{
-				"total_assets": len(assetData.Assets),
-				"total_volume": assetData.TotalVolume,
-				"total_transfers": assetData.TotalTransfers,
-				"top_3_assets": topAssets,
-			}
-		}
-	}
-	
-	json.NewEncoder(w).Encode(response)
-}
 
-// handleChainAssetsDebug provides debugging tools for chain assets wrapping issues
-func (s *Server) handleChainAssetsDebug(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
-	clickhouseService := s.coordinator.GetClickHouseService()
-	
-	// Force clear chain assets cache to apply wrapping fix
-	if r.URL.Query().Get("clear_cache") == "true" {
-		clickhouseService.ClearChainAssetsCache()
-	}
-	
-	response := map[string]interface{}{
-		"timestamp": time.Now(),
-		"message": "Chain assets wrapping fix applied - cache cleared",
-		"status": "Chain assets now use canonical token grouping",
-		"fix_details": map[string]interface{}{
-			"issue": "Chain flow assets were not grouping wrapped tokens with underlying assets",
-			"solution": "Updated getChainAssets query to use canonical token grouping like asset volume chart",
-			"grouping_logic": "coalesce(base_denom, unwrapped_denom, wrapped_denom, canonical_token_symbol, token_symbol)",
-			"result": "WETH, ETH, wstETH etc. now grouped as single underlying asset",
-		},
-		"cache_cleared": r.URL.Query().Get("clear_cache") == "true",
-	}
-	
-	json.NewEncoder(w).Encode(response)
-}
-
-// handleSyncStatus provides debugging information about the sync manager status
-func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
-	// Get coordinator stats which includes sync manager status
-	stats := s.coordinator.GetStats()
-	
-	clickhouseService := s.coordinator.GetClickHouseService()
-	transferCount, _ := clickhouseService.GetTransferCount()
-	earliestSortOrder, _ := clickhouseService.GetEarliestSortOrder()
-	latestSortOrder, _ := clickhouseService.GetLatestSortOrder()
-	
-	response := map[string]interface{}{
-		"timestamp": time.Now(),
-		"sync_manager_stats": stats["components"].(map[string]interface{})["syncManager"],
-		"database_info": map[string]interface{}{
-			"total_transfers": transferCount,
-			"earliest_sort_order": earliestSortOrder,
-			"latest_sort_order": latestSortOrder,
-		},
-		"channels": stats["channels"],
-		"architecture": stats["architecture"],
-	}
-	
-	json.NewEncoder(w).Encode(response)
-}
 
 // handleFetcherStats returns fetcher component statistics
 func (s *Server) handleFetcherStats(w http.ResponseWriter, r *http.Request) {

@@ -312,14 +312,14 @@ func (c *ClickHouseService) GetTransferRates(ctx context.Context) (*FrontendTran
 func (c *ClickHouseService) getTransferRatesFromDB(ctx context.Context) (*FrontendTransferRates, error) {
 	query := `
 		SELECT 
-			countIf(timestamp >= now() - INTERVAL 5 MINUTE) as tx_per_minute,
-			countIf(timestamp >= now() - INTERVAL 1 HOUR) as tx_per_hour,
-			countIf(timestamp >= now() - INTERVAL 1 DAY) as tx_per_day,
-			countIf(timestamp >= now() - INTERVAL 7 DAY) as tx_per_7days,
-			countIf(timestamp >= now() - INTERVAL 14 DAY) as tx_per_14days,
-			countIf(timestamp >= now() - INTERVAL 30 DAY) as tx_per_30days,
-			uniqIf(sender, timestamp >= now() - INTERVAL 30 DAY) as unique_senders,
-			uniqIf(receiver, timestamp >= now() - INTERVAL 30 DAY) as unique_receivers,
+			countIf(timestamp >= now('UTC') - INTERVAL 5 MINUTE) as tx_per_minute,
+			countIf(timestamp >= now('UTC') - INTERVAL 1 HOUR) as tx_per_hour,
+			countIf(timestamp >= now('UTC') - INTERVAL 1 DAY) as tx_per_day,
+			countIf(timestamp >= now('UTC') - INTERVAL 7 DAY) as tx_per_7days,
+			countIf(timestamp >= now('UTC') - INTERVAL 14 DAY) as tx_per_14days,
+			countIf(timestamp >= now('UTC') - INTERVAL 30 DAY) as tx_per_30days,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 30 DAY) as unique_senders,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 30 DAY) as unique_receivers,
 			count() as total_tracked,
 			max(timestamp) as last_update
 		FROM transfers_analytics
@@ -379,28 +379,28 @@ func (c *ClickHouseService) getActiveWalletRatesFromDB(ctx context.Context) (*Ac
 	query := `
 		SELECT 
 			-- Senders per time period
-			uniqIf(sender, timestamp >= now() - INTERVAL 5 MINUTE) as senders_min,
-			uniqIf(sender, timestamp >= now() - INTERVAL 1 HOUR) as senders_hour,
-			uniqIf(sender, timestamp >= now() - INTERVAL 1 DAY) as senders_day,
-			uniqIf(sender, timestamp >= now() - INTERVAL 7 DAY) as senders_7d,
-			uniqIf(sender, timestamp >= now() - INTERVAL 14 DAY) as senders_14d,
-			uniqIf(sender, timestamp >= now() - INTERVAL 30 DAY) as senders_30d,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 5 MINUTE) as senders_min,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 1 HOUR) as senders_hour,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 1 DAY) as senders_day,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 7 DAY) as senders_7d,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 14 DAY) as senders_14d,
+			uniqIf(sender, timestamp >= now('UTC') - INTERVAL 30 DAY) as senders_30d,
 			
 			-- Receivers per time period
-			uniqIf(receiver, timestamp >= now() - INTERVAL 5 MINUTE) as receivers_min,
-			uniqIf(receiver, timestamp >= now() - INTERVAL 1 HOUR) as receivers_hour,
-			uniqIf(receiver, timestamp >= now() - INTERVAL 1 DAY) as receivers_day,
-			uniqIf(receiver, timestamp >= now() - INTERVAL 7 DAY) as receivers_7d,
-			uniqIf(receiver, timestamp >= now() - INTERVAL 14 DAY) as receivers_14d,
-			uniqIf(receiver, timestamp >= now() - INTERVAL 30 DAY) as receivers_30d,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 5 MINUTE) as receivers_min,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 1 HOUR) as receivers_hour,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 1 DAY) as receivers_day,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 7 DAY) as receivers_7d,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 14 DAY) as receivers_14d,
+			uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 30 DAY) as receivers_30d,
 			
 			-- Total unique wallets (use separate subqueries to avoid arrayJoin complexity)
-			(uniqIf(sender, timestamp >= now() - INTERVAL 5 MINUTE) + uniqIf(receiver, timestamp >= now() - INTERVAL 5 MINUTE)) as total_min,
-			(uniqIf(sender, timestamp >= now() - INTERVAL 1 HOUR) + uniqIf(receiver, timestamp >= now() - INTERVAL 1 HOUR)) as total_hour,
-			(uniqIf(sender, timestamp >= now() - INTERVAL 1 DAY) + uniqIf(receiver, timestamp >= now() - INTERVAL 1 DAY)) as total_day,
-			(uniqIf(sender, timestamp >= now() - INTERVAL 7 DAY) + uniqIf(receiver, timestamp >= now() - INTERVAL 7 DAY)) as total_7d,
-			(uniqIf(sender, timestamp >= now() - INTERVAL 14 DAY) + uniqIf(receiver, timestamp >= now() - INTERVAL 14 DAY)) as total_14d,
-			(uniqIf(sender, timestamp >= now() - INTERVAL 30 DAY) + uniqIf(receiver, timestamp >= now() - INTERVAL 30 DAY)) as total_30d,
+			(uniqIf(sender, timestamp >= now('UTC') - INTERVAL 5 MINUTE) + uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 5 MINUTE)) as total_min,
+			(uniqIf(sender, timestamp >= now('UTC') - INTERVAL 1 HOUR) + uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 1 HOUR)) as total_hour,
+			(uniqIf(sender, timestamp >= now('UTC') - INTERVAL 1 DAY) + uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 1 DAY)) as total_day,
+			(uniqIf(sender, timestamp >= now('UTC') - INTERVAL 7 DAY) + uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 7 DAY)) as total_7d,
+			(uniqIf(sender, timestamp >= now('UTC') - INTERVAL 14 DAY) + uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 14 DAY)) as total_14d,
+			(uniqIf(sender, timestamp >= now('UTC') - INTERVAL 30 DAY) + uniqIf(receiver, timestamp >= now('UTC') - INTERVAL 30 DAY)) as total_30d,
 			
 			-- All-time totals
 			uniq(sender) as unique_senders_total,
@@ -695,7 +695,7 @@ func (c *ClickHouseService) getPopularRoutesFromDB(ctx context.Context, limit in
 			sum(amount) as total_volume,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		GROUP BY source_chain, dest_chain, source_name, dest_name, route
 		ORDER BY transfer_count DESC
 		LIMIT ?
@@ -785,7 +785,7 @@ func (c *ClickHouseService) getTopSendersFromDB(ctx context.Context, limit int, 
 			count() as transfer_count,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		GROUP BY sender
 		ORDER BY transfer_count DESC, last_activity DESC
 		LIMIT ?
@@ -862,7 +862,7 @@ func (c *ClickHouseService) getTopReceiversFromDB(ctx context.Context, limit int
 			count() as transfer_count,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		GROUP BY receiver
 		ORDER BY transfer_count DESC, last_activity DESC
 		LIMIT ?
@@ -944,7 +944,7 @@ func (c *ClickHouseService) getChainFlowDataFromDB(ctx context.Context, timefram
 	utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: Querying chain flow data for timeframe %s (interval: %s)", timeframe, interval)
 	
 	// First, check if we have any data in the timeframe
-	countQuery := fmt.Sprintf("SELECT count() FROM transfers_analytics WHERE timestamp >= now() - INTERVAL %s", interval)
+	countQuery := fmt.Sprintf("SELECT count() FROM transfers_analytics WHERE timestamp >= now('UTC') - INTERVAL %s", interval)
 	var totalCount uint64
 	err := c.conn.QueryRow(ctx, countQuery).Scan(&totalCount)
 	if err != nil {
@@ -961,7 +961,7 @@ func (c *ClickHouseService) getChainFlowDataFromDB(ctx context.Context, timefram
 			CAST(0 AS UInt64) as incoming_count,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		GROUP BY source_chain, source_name
 		
 		UNION ALL
@@ -973,7 +973,7 @@ func (c *ClickHouseService) getChainFlowDataFromDB(ctx context.Context, timefram
 			count() as incoming_count,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		GROUP BY dest_chain, dest_name
 		
 		ORDER BY chain_id
@@ -1098,7 +1098,7 @@ func (c *ClickHouseService) getChainAssets(ctx context.Context, chainID, timefra
 			avg(amount) as average_amount,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		  AND (source_chain = '%s' OR dest_chain = '%s')
 		  AND token_symbol != '' AND token_symbol IS NOT NULL
 		GROUP BY canonical_asset
@@ -1358,6 +1358,8 @@ func (c *ClickHouseService) ClearAssetVolumeCache() {
 	}
 }
 
+
+
 // ClearChainAssetsCache clears chain assets cache for all chains and timeframes
 func (c *ClickHouseService) ClearChainAssetsCache() {
 	// Clear all chain assets cache entries (pattern: chain_assets_*)
@@ -1404,7 +1406,7 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 				ELSE token_symbol 
 			   END) as unique_assets
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		  AND token_symbol != ''
 		  AND token_symbol IS NOT NULL
 	`, interval)
@@ -1432,7 +1434,7 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 			avg(amount) as average_amount,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		  AND token_symbol != ''
 		  AND token_symbol IS NOT NULL
 		GROUP BY 
@@ -1544,7 +1546,7 @@ func (c *ClickHouseService) getAssetTopRoutes(ctx context.Context, assetSymbol, 
 			sum(amount) as route_volume,
 			max(timestamp) as last_activity
 		FROM transfers_analytics 
-		WHERE timestamp >= now() - INTERVAL %s
+		WHERE timestamp >= now('UTC') - INTERVAL %s
 		  AND coalesce(nullif(base_denom, ''), nullif(unwrapped_denom, ''), nullif(wrapped_denom, ''), canonical_token_symbol, token_symbol) = '%s'
 		GROUP BY source_chain, dest_chain, source_name, dest_name
 		ORDER BY route_count DESC

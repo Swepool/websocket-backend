@@ -52,11 +52,6 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 	mux.HandleFunc("/api/broadcaster", s.handleBroadcasterStats)
 	mux.HandleFunc("/api/cache", s.handleCacheStats)
 	
-	// Debug endpoints
-	mux.HandleFunc("/api/debug/asset-volumes", s.handleAssetVolumeDebug)
-	mux.HandleFunc("/api/debug/chain-assets", s.handleChainAssetsDebug)
-	mux.HandleFunc("/api/debug/sync-status", s.handleSyncStatus)
-	
 	// Health check endpoint (for compatibility)
 	mux.HandleFunc("/health", s.handleHealth)
 	

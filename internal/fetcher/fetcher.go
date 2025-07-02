@@ -157,8 +157,9 @@ func (f *Fetcher) fetchRealTransfers(ctx context.Context) ([]models.Transfer, er
 		transfers, err = f.graphqlClient.FetchLatestTransfers(ctx, 1, nil)
 		utils.LogInfo("FETCHER", "🚀 Fetching latest transfer to establish baseline")
 	} else {
-		transfers, err = f.graphqlClient.FetchNewTransfers(ctx, f.lastSortOrder, f.config.BatchSize, nil)
-		utils.LogDebug("FETCHER", "🔄 Fetching new transfers since sort order: %s", f.lastSortOrder)
+		// Use the safe version that implements 10-second buffer to avoid processing delays
+		transfers, err = f.graphqlClient.FetchNewTransfersSafe(ctx, f.lastSortOrder, f.config.BatchSize, nil)
+		utils.LogDebug("FETCHER", "🔄 Fetching new transfers since sort order: %s (with 10s safety buffer)", f.lastSortOrder)
 	}
 	
 	if err != nil {

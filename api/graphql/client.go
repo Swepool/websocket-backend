@@ -436,6 +436,28 @@ func (c *Client) FetchNewTransfers(ctx context.Context, lastSortOrder string, li
 	return transfers, nil
 }
 
+// FetchNewTransfersSafe fetches new transfers since the last sort order with a 10-second safety buffer
+// This prevents fetching transfers that are too recent and might still be processing
+func (c *Client) FetchNewTransfersSafe(ctx context.Context, lastSortOrder string, limit int, network []string) ([]models.Transfer, error) {
+	// Get all transfers greater than lastSortOrder
+	allTransfers, err := c.FetchNewTransfers(ctx, lastSortOrder, limit, network)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Filter out transfers that are too recent (within 10 seconds)
+	safeTransfers := make([]models.Transfer, 0, len(allTransfers))
+	cutoffTime := time.Now().UTC().Add(-10 * time.Second)
+	
+	for _, transfer := range allTransfers {
+		if transfer.TransferSendTimestamp.Before(cutoffTime) || transfer.TransferSendTimestamp.Equal(cutoffTime) {
+			safeTransfers = append(safeTransfers, transfer)
+		}
+	}
+	
+	return safeTransfers, nil
+}
+
 // FetchChains fetches all available chains
 func (c *Client) FetchChains(ctx context.Context) ([]models.Chain, error) {
 	result, err := c.executeQuery(ctx, chainsQuery, nil)
