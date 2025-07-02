@@ -28,9 +28,9 @@ type LatencyConfig struct {
 func DefaultLatencyConfig() LatencyConfig {
 	return LatencyConfig{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  2 * time.Minute, // Same as chains for latency data
+		CheckInterval:  10 * time.Minute, // Reduced from 2min to avoid rate limiting
 		RequestTimeout: 5 * time.Second,
-		MaxConcurrency: 20,
+		MaxConcurrency: 10,
 	}
 }
 
@@ -263,9 +263,11 @@ func (s *LatencyService) GetLatencyDataInterface() []interface{} {
 			utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: chainsService is NIL")
 		} else {
 			chains := s.chainsService.GetAllChains()
-			utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: chainsService returned %d chains (need %d minimum)", len(chains), MinChainsForLatency)
-			if len(chains) == 0 {
-				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Chains service has 0 chains - likely GraphQL fetch failed")
+			if len(chains) < MinChainsForLatency {
+				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Not enough chains (%d chains, need %d minimum)", len(chains), MinChainsForLatency)
+			} else {
+				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Have %d chains (sufficient), but latency data map is empty - likely due to GraphQL rate limiting", len(chains))
+				utils.LogError("LATENCY_SERVICE", "💡 SOLUTION: Latency fetches are probably failing due to HTTP 429 rate limits")
 			}
 		}
 	}
