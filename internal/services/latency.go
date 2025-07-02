@@ -120,24 +120,37 @@ func (s *LatencyService) fetchLatencyForPair(ctx context.Context, source, dest m
 }
 
 // validateChainsForLatency checks if we have enough chains for latency monitoring
-func (s *LatencyService) validateChainsForLatency() ([]models.Chain, error) {
-	if s.chainsService == nil {
-		utils.LogWarn("LATENCY_SERVICE", "No chains service available for latency data")
-		return []models.Chain{}, nil
+func (s *LatencyService) validateChainsForLatency(ctx context.Context) ([]models.Chain, error) {
+	// First try to get from chains service cache
+	if s.chainsService != nil {
+		chains := s.chainsService.GetAllChains()
+		if len(chains) >= MinChainsForLatency {
+			utils.LogInfo("LATENCY_SERVICE", "✅ Using %d chains from chains service cache", len(chains))
+			return chains, nil
+		}
+		utils.LogInfo("LATENCY_SERVICE", "⚠️ Chains service only has %d chains, fetching directly from GraphQL", len(chains))
 	}
 
-	chains := s.chainsService.GetAllChains()
+	// Fallback: fetch chains directly from GraphQL (like node health service does)
+	utils.LogInfo("LATENCY_SERVICE", "🔍 Fetching chains directly from GraphQL API...")
+	chains, err := s.graphql.FetchChains(ctx)
+	if err != nil {
+		utils.LogError("LATENCY_SERVICE", "❌ Failed to fetch chains from GraphQL: %v", err)
+		return []models.Chain{}, err
+	}
+
 	if len(chains) < MinChainsForLatency {
-		utils.LogWarn("LATENCY_SERVICE", "Not enough chains for latency data (%d chains)", len(chains))
+		utils.LogWarn("LATENCY_SERVICE", "❌ Not enough chains for latency monitoring: %d < %d required", len(chains), MinChainsForLatency)
 		return []models.Chain{}, nil
 	}
 
+	utils.LogInfo("LATENCY_SERVICE", "✅ Fetched %d chains directly from GraphQL", len(chains))
 	return chains, nil
 }
 
 // FetchLatencyData fetches latency statistics for all chain pairs
 func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.LatencyData, error) {
-	chains, err := s.validateChainsForLatency()
+	chains, err := s.validateChainsForLatency(ctx)
 	if err != nil || len(chains) == 0 {
 		return []models.LatencyData{}, err
 	}
@@ -217,14 +230,7 @@ func (s *LatencyService) refreshLatencyData(ctx context.Context) {
 
 		utils.LogInfo("LATENCY_SERVICE", "🔍 Starting latency data refresh...")
 		
-		// Check chains first
-		chains := s.chainsService.GetAllChains()
-		utils.LogInfo("LATENCY_SERVICE", "🔍 Chains service has %d chains loaded", len(chains))
-		
-		if len(chains) < MinChainsForLatency {
-			utils.LogWarn("LATENCY_SERVICE", "❌ Not enough chains for latency monitoring: %d < %d required", len(chains), MinChainsForLatency)
-			return
-		}
+		// Validation is now done inside FetchLatencyData with fallback to direct GraphQL fetch
 
 		latencyData, err := s.FetchLatencyData(latencyCtx)
 		if err != nil {
