@@ -109,7 +109,7 @@ func LoadConfig() Config {
 			HTTPTimeout:           getEnvDuration("BACKWARD_FETCHER_HTTP_TIMEOUT", 30*time.Second),
 			RetryDelay:            getEnvDuration("BACKWARD_FETCHER_RETRY_DELAY", 1*time.Second),
 			DatabaseRetryDelay:    getEnvDuration("BACKWARD_FETCHER_DB_RETRY_DELAY", 500*time.Millisecond),
-			RateLimitDelay:        getEnvDuration("BACKWARD_FETCHER_RATE_LIMIT_DELAY", 500*time.Millisecond),
+			RateLimitDelay:        getEnvDuration("BACKWARD_FETCHER_RATE_LIMIT_DELAY", 150*time.Millisecond),
 			BackpressureTimeoutMs: getEnvInt("BACKWARD_FETCHER_BACKPRESSURE_TIMEOUT_MS", 1000),
 		},
 		Processor: ProcessorConfig{
