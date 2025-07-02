@@ -40,47 +40,65 @@ func NewChartBroadcaster(clickhouseService *ClickHouseService, broadcasterInstan
 	}
 }
 
-// BroadcastChartUpdate broadcasts chart data to all connected clients (cache-first)
-// This method now primarily serves from cache (6-minute TTL) populated by staggered updates
+// BroadcastChartUpdate broadcasts chart data to all connected clients (PURE cache-first)
+// This method reads ONLY from cache populated by staggered updates - never hits database
 func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
-	utils.LogDebug("CHART_BROADCASTER", "Broadcasting chart data update (cache-first) via ClickHouse")
+	utils.LogDebug("CHART_BROADCASTER", "Broadcasting chart data update (PURE cache-first)")
 	
-	// Get optimized chart data from ClickHouse
-	transferRates, err := cb.clickhouseService.GetTransferRates(ctx)
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "Failed to get transfer rates from ClickHouse: %v", err)
-		return
+	// Get cache instance from ClickHouse service
+	cache := cb.clickhouseService.GetCache()
+	
+	// Read transfer rates from cache ONLY
+	var transferRates *FrontendTransferRates
+	if data, hit := cache.Get("transfer_rates"); hit {
+		transferRates = data.(*FrontendTransferRates)
+		utils.LogDebug("CHART_BROADCASTER", "✅ Transfer rates cache HIT")
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Transfer rates cache MISS - using empty data")
+		transferRates = &FrontendTransferRates{} // Empty fallback
 	}
 	
-	activeWalletRates, err := cb.clickhouseService.GetActiveWalletRates(ctx)
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "Failed to get active wallet rates from ClickHouse: %v", err)
-		return
+	// Read active wallet rates from cache ONLY
+	var activeWalletRates *ActiveWalletRates
+	if data, hit := cache.Get("active_wallet_rates"); hit {
+		activeWalletRates = data.(*ActiveWalletRates)
+		utils.LogDebug("CHART_BROADCASTER", "✅ Active wallet rates cache HIT")
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Active wallet rates cache MISS - using empty data")
+		activeWalletRates = &ActiveWalletRates{} // Empty fallback
 	}
 	
-	popularRoutes, err := cb.clickhouseService.GetPopularRoutes(ctx, 20, "7d")
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "Failed to get popular routes from ClickHouse: %v", err)
-		popularRoutes = []FrontendRouteData{} // Default to empty
+	// Read popular routes from cache ONLY
+	var popularRoutes []FrontendRouteData
+	if data, hit := cache.Get("popular_routes_7d_20"); hit {
+		popularRoutes = data.([]FrontendRouteData)
+		utils.LogDebug("CHART_BROADCASTER", "✅ Popular routes cache HIT")
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Popular routes cache MISS - using empty data")
+		popularRoutes = []FrontendRouteData{} // Empty fallback
 	}
 	
-	// Get popular routes for all timeframes (for timeScale data)
+	// Read popular routes for all timeframes from cache ONLY
 	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
 	popularRoutesTimeScale := make(map[string][]FrontendRouteData)
 	for _, tf := range timeframes {
-		routes, err := cb.clickhouseService.GetPopularRoutes(ctx, 20, tf)
-		if err != nil {
-			utils.LogDebug("CHART_BROADCASTER", "Failed to get routes for timeframe %s: %v", tf, err)
-			routes = []FrontendRouteData{}
+		cacheKey := fmt.Sprintf("popular_routes_%s_20", tf)
+		if data, hit := cache.Get(cacheKey); hit {
+			popularRoutesTimeScale[tf] = data.([]FrontendRouteData)
+			utils.LogDebug("CHART_BROADCASTER", "✅ Popular routes %s cache HIT", tf)
+		} else {
+			utils.LogDebug("CHART_BROADCASTER", "❌ Popular routes %s cache MISS", tf)
+			popularRoutesTimeScale[tf] = []FrontendRouteData{}
 		}
-		popularRoutesTimeScale[tf] = routes
 	}
 	
-	// Get chain flow data
-	chainFlowData, err := cb.clickhouseService.GetChainFlowData(ctx, "1d")
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "Failed to get chain flow data from ClickHouse: %v", err)
-		// Create empty chain flow data
+	// Read chain flow data from cache ONLY
+	var chainFlowData *FrontendChainFlowData
+	if data, hit := cache.Get("chain_flow_data_1d"); hit {
+		chainFlowData = data.(*FrontendChainFlowData)
+		utils.LogDebug("CHART_BROADCASTER", "✅ Chain flow data cache HIT")
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Chain flow data cache MISS - using empty data")
 		chainFlowData = &FrontendChainFlowData{
 			Chains:              []FrontendChainData{},
 			ChainFlowTimeScale:  make(map[string][]FrontendChainData),
@@ -90,60 +108,79 @@ func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
 		}
 	}
 	
-	// Get chain flow data for all timeframes (for timeScale data)
+	// Read chain flow data for all timeframes from cache ONLY
 	chainFlowTimeScale := make(map[string][]FrontendChainData)
 	for _, tf := range timeframes {
-		chainData, err := cb.clickhouseService.GetChainFlowData(ctx, tf)
-		if err != nil {
-			utils.LogDebug("CHART_BROADCASTER", "Failed to get chain flow for timeframe %s: %v", tf, err)
-			chainFlowTimeScale[tf] = []FrontendChainData{}
+		cacheKey := fmt.Sprintf("chain_flow_data_%s", tf)
+		if data, hit := cache.Get(cacheKey); hit {
+			if chainData, ok := data.(*FrontendChainFlowData); ok {
+				chainFlowTimeScale[tf] = chainData.Chains
+				utils.LogDebug("CHART_BROADCASTER", "✅ Chain flow %s cache HIT", tf)
+			} else {
+				chainFlowTimeScale[tf] = []FrontendChainData{}
+			}
 		} else {
-			chainFlowTimeScale[tf] = chainData.Chains
+			utils.LogDebug("CHART_BROADCASTER", "❌ Chain flow %s cache MISS", tf)
+			chainFlowTimeScale[tf] = []FrontendChainData{}
 		}
 	}
 	
 	// Update chain flow data with timeScale
 	chainFlowData.ChainFlowTimeScale = chainFlowTimeScale
 	
-	// Get wallet activity for default timeframe (last hour)
-	activeSenders, err := cb.clickhouseService.GetTopSenders(ctx, 10, "1h")
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "Failed to get active senders: %v", err)
-		activeSenders = []FrontendWalletData{} // Default to empty
+	// Read wallet activity for default timeframe from cache ONLY
+	var activeSenders []FrontendWalletData
+	if data, hit := cache.Get("top_senders_1h_10"); hit {
+		activeSenders = data.([]FrontendWalletData)
+		utils.LogDebug("CHART_BROADCASTER", "✅ Active senders cache HIT")
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Active senders cache MISS - using empty data")
+		activeSenders = []FrontendWalletData{}
 	}
 	
-	activeReceivers, err := cb.clickhouseService.GetTopReceivers(ctx, 10, "1h")
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "Failed to get active receivers: %v", err)
-		activeReceivers = []FrontendWalletData{} // Default to empty
+	var activeReceivers []FrontendWalletData
+	if data, hit := cache.Get("top_receivers_1h_10"); hit {
+		activeReceivers = data.([]FrontendWalletData)
+		utils.LogDebug("CHART_BROADCASTER", "✅ Active receivers cache HIT")
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Active receivers cache MISS - using empty data")
+		activeReceivers = []FrontendWalletData{}
 	}
 	
-	// Get wallet activity for all timeframes (for timeScale data)
+	// Read wallet activity for all timeframes from cache ONLY
 	activeSendersTimeScale := make(map[string][]FrontendWalletData)
 	activeReceiversTimeScale := make(map[string][]FrontendWalletData)
 	
 	for _, tf := range timeframes {
-		senders, err := cb.clickhouseService.GetTopSenders(ctx, 10, tf)
-		if err != nil {
-			utils.LogDebug("CHART_BROADCASTER", "Failed to get senders for timeframe %s: %v", tf, err)
-			senders = []FrontendWalletData{}
+		// Read senders from cache
+		sendersCacheKey := fmt.Sprintf("top_senders_%s_10", tf)
+		if data, hit := cache.Get(sendersCacheKey); hit {
+			activeSendersTimeScale[tf] = data.([]FrontendWalletData)
+			utils.LogDebug("CHART_BROADCASTER", "✅ Senders %s cache HIT", tf)
+		} else {
+			utils.LogDebug("CHART_BROADCASTER", "❌ Senders %s cache MISS", tf)
+			activeSendersTimeScale[tf] = []FrontendWalletData{}
 		}
-		activeSendersTimeScale[tf] = senders
 		
-		receivers, err := cb.clickhouseService.GetTopReceivers(ctx, 10, tf)
-		if err != nil {
-			utils.LogDebug("CHART_BROADCASTER", "Failed to get receivers for timeframe %s: %v", tf, err)
-			receivers = []FrontendWalletData{}
+		// Read receivers from cache
+		receiversCacheKey := fmt.Sprintf("top_receivers_%s_10", tf)
+		if data, hit := cache.Get(receiversCacheKey); hit {
+			activeReceiversTimeScale[tf] = data.([]FrontendWalletData)
+			utils.LogDebug("CHART_BROADCASTER", "✅ Receivers %s cache HIT", tf)
+		} else {
+			utils.LogDebug("CHART_BROADCASTER", "❌ Receivers %s cache MISS", tf)
+			activeReceiversTimeScale[tf] = []FrontendWalletData{}
 		}
-		activeReceiversTimeScale[tf] = receivers
 	}
 	
-	// Get asset volume data
-	utils.LogInfo("CHART_BROADCASTER", "🔍 ATTEMPTING to fetch asset volume data...")
-	assetVolumeData, err := cb.clickhouseService.GetAssetVolumes(ctx, "1h")
-	if err != nil {
-		utils.LogError("CHART_BROADCASTER", "❌ FAILED to get asset volumes from ClickHouse: %v", err)
-		// Don't return - continue with empty asset data
+	// Read asset volume data from cache ONLY
+	var assetVolumeData *FrontendAssetVolumeData
+	if data, hit := cache.Get("asset_volumes_1h"); hit {
+		assetVolumeData = data.(*FrontendAssetVolumeData)
+		utils.LogInfo("CHART_BROADCASTER", "✅ Asset volume data cache HIT: %d assets, total volume: %.2f", 
+			len(assetVolumeData.Assets), assetVolumeData.TotalVolume)
+	} else {
+		utils.LogWarn("CHART_BROADCASTER", "❌ Asset volume data cache MISS - using empty data")
 		assetVolumeData = &FrontendAssetVolumeData{
 			Assets:               []FrontendAsset{},
 			AssetVolumeTimeScale: make(map[string][]FrontendAsset),
@@ -152,34 +189,31 @@ func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
 			TotalTransfers:       0,
 			ServerUptimeSeconds:  0,
 		}
-		utils.LogError("CHART_BROADCASTER", "❌ Using empty asset data due to error")
-	} else {
-		utils.LogInfo("CHART_BROADCASTER", "✅ Successfully fetched asset volume data: %d assets, total volume: %.2f", 
-			len(assetVolumeData.Assets), assetVolumeData.TotalVolume)
 	}
 	
-	// Get asset volume data for all timeframes (for timeScale data)
+	// Read asset volume data for all timeframes from cache ONLY
 	assetVolumeTimeScale := make(map[string][]FrontendAsset)
 	for _, tf := range timeframes {
-		utils.LogInfo("CHART_BROADCASTER", "🔍 FETCHING asset volumes for timeframe: %s", tf)
-		assetData, err := cb.clickhouseService.GetAssetVolumes(ctx, tf)
-		if err != nil {
-			utils.LogError("CHART_BROADCASTER", "❌ FAILED to get asset volumes for timeframe %s: %v", tf, err)
-			assetVolumeTimeScale[tf] = []FrontendAsset{}
-		} else {
-			assetVolumeTimeScale[tf] = assetData.Assets
-			utils.LogInfo("CHART_BROADCASTER", "✅ TIMEFRAME DEBUG: %s has %d assets", tf, len(assetData.Assets))
-			if len(assetData.Assets) == 0 {
-				utils.LogWarn("CHART_BROADCASTER", "⚠️  EMPTY RESULT for timeframe %s - no assets found", tf)
-			} else {
-				// Debug: Show top 3 assets for this timeframe
-				for i, asset := range assetData.Assets {
-					if i < 3 {
-						utils.LogInfo("CHART_BROADCASTER", "🔍 [%s] Top asset #%d: %s (count=%d, vol=%.2f)", 
-							tf, i+1, asset.AssetSymbol, asset.TransferCount, asset.TotalVolume)
+		cacheKey := fmt.Sprintf("asset_volumes_%s", tf)
+		if data, hit := cache.Get(cacheKey); hit {
+			if assetData, ok := data.(*FrontendAssetVolumeData); ok {
+				assetVolumeTimeScale[tf] = assetData.Assets
+				utils.LogInfo("CHART_BROADCASTER", "✅ Asset volumes %s cache HIT: %d assets", tf, len(assetData.Assets))
+				if len(assetData.Assets) > 0 {
+					// Debug: Show top 3 assets for this timeframe
+					for i, asset := range assetData.Assets {
+						if i < 3 {
+							utils.LogDebug("CHART_BROADCASTER", "[%s] Top asset #%d: %s (count=%d, vol=%.2f)", 
+								tf, i+1, asset.AssetSymbol, asset.TransferCount, asset.TotalVolume)
+						}
 					}
 				}
+			} else {
+				assetVolumeTimeScale[tf] = []FrontendAsset{}
 			}
+		} else {
+			utils.LogDebug("CHART_BROADCASTER", "❌ Asset volumes %s cache MISS", tf)
+			assetVolumeTimeScale[tf] = []FrontendAsset{}
 		}
 	}
 	
@@ -272,7 +306,7 @@ func (cb *ChartBroadcaster) BroadcastChartUpdate(ctx context.Context) {
 		"nodeHealthData":           nodeHealthData,           // Node health data for monitoring
 		"lastUpdated":              time.Now().Format("2006-01-02 15:04:05"),
 		"dataSource":               "clickhouse",
-		"cached":                   false, // Indicate this was freshly built
+		"cached":                   true,  // Indicate this was built from cache
 	}
 	
 	utils.LogInfo("CHART_BROADCASTER", "🔍 DEBUG: Chart data payload includes assetVolumeData with %d assets", 
