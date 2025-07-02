@@ -652,15 +652,8 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 	// Read from the same individual cache keys that ChartBroadcaster uses
 	cache := c.cache
 	
-	// Check if we have at least the basic data cached (transfer rates is a good indicator)
-	if _, hit := cache.Get("transfer_rates"); !hit {
-		utils.LogDebug("CACHE", "Cache miss for basic transfer_rates (cache-only) - cache appears cold")
-		return nil, false
-	}
+	utils.LogDebug("CACHE", "Building chart data from whatever is cached (cache-only)")
 	
-	utils.LogDebug("CACHE", "Cache appears warm, building chart data from individual cache entries (cache-only)")
-	
-	// Read transfer rates from cache ONLY
 	var transferRates *FrontendTransferRates
 	if data, hit := cache.Get("transfer_rates"); hit {
 		transferRates = data.(*FrontendTransferRates)
@@ -668,7 +661,6 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 		transferRates = &FrontendTransferRates{}
 	}
 	
-	// Read active wallet rates from cache ONLY
 	var activeWalletRates *ActiveWalletRates
 	if data, hit := cache.Get("active_wallet_rates"); hit {
 		activeWalletRates = data.(*ActiveWalletRates)
@@ -676,7 +668,6 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 		activeWalletRates = &ActiveWalletRates{}
 	}
 	
-	// Read popular routes from cache ONLY
 	var popularRoutes []FrontendRouteData
 	if data, hit := cache.Get("popular_routes_7d_20"); hit {
 		popularRoutes = data.([]FrontendRouteData)
@@ -831,7 +822,7 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 		"cached":                   true,
 	}
 	
-	utils.LogDebug("CACHE", "Built chart data from individual cache entries (cache-only)")
+	utils.LogDebug("CACHE", "Built chart data from cache (cache-only)")
 	return chartData, true
 }
 
