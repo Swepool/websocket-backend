@@ -257,24 +257,6 @@ func (s *LatencyService) GetLatencyData() []models.LatencyData {
 // GetLatencyDataInterface returns current latency data as interface{} for the chart broadcaster
 func (s *LatencyService) GetLatencyDataInterface() []interface{} {
 	latencyData := s.GetLatencyData()
-	utils.LogInfo("LATENCY_SERVICE", "🔍 GetLatencyDataInterface: Returning %d latency data points", len(latencyData))
-	
-	if len(latencyData) == 0 {
-		// Diagnose why we have no data
-		if s.chainsService == nil {
-			utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: chainsService is NIL")
-		} else {
-			chains := s.chainsService.GetAllChains()
-			if len(chains) < MinChainsForLatency {
-				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Not enough chains (%d chains, need %d minimum)", len(chains), MinChainsForLatency)
-			} else {
-				utils.LogError("LATENCY_SERVICE", "❌ DIAGNOSIS: Have %d chains (sufficient), but latency data map is empty - likely due to GraphQL rate limiting", len(chains))
-				utils.LogError("LATENCY_SERVICE", "💡 SOLUTION: Using conservative settings (3 concurrent, 15min interval, 100ms delays) to avoid HTTP 429 errors")
-				utils.LogError("LATENCY_SERVICE", "🕐 TIMING: Next latency fetch will happen in 15 minutes - please wait for rate limits to reset")
-			}
-		}
-	}
-	
 	result := make([]interface{}, len(latencyData))
 	for i, data := range latencyData {
 		result[i] = data
