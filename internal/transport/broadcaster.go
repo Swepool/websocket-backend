@@ -802,7 +802,7 @@ func (sb *Broadcaster) sendInitialChartData(client *Client) {
 		}
 	}()
 
-	utils.LogInfo("SHARDED_BROADCASTER", "Sending initial chart data to client %s", client.id)
+	utils.LogInfo("SHARDED_BROADCASTER", "Sending initial chart data to client %s (cache-only)", client.id)
 
 	if sb.chartService == nil {
 		utils.LogWarn("SHARDED_BROADCASTER", "No chart service available for initial data")
@@ -819,12 +819,12 @@ func (sb *Broadcaster) sendInitialChartData(client *Client) {
 		return
 	}
 	
-	// Type assert to get the chart service interface
-	if chartService, ok := sb.chartService.(interface{ GetChartDataForFrontend() (map[string]interface{}, error) }); ok {
-		chartData, err := chartService.GetChartDataForFrontend()
-		if err != nil {
-			utils.LogError("SHARDED_BROADCASTER", "Failed to get initial chart data for client %s: %v", client.id, err)
-			return
+	// Type assert to get the cache-only chart service interface
+	if chartService, ok := sb.chartService.(interface{ GetChartDataForFrontendCacheOnly() (map[string]interface{}, bool) }); ok {
+		chartData, cacheHit := chartService.GetChartDataForFrontendCacheOnly()
+		
+		if !cacheHit {
+			utils.LogInfo("SHARDED_BROADCASTER", "Cache miss for client %s - sending empty initial data (will get real data on next broadcast)", client.id)
 		}
 		
 		// Wrap chart data in the same format as regular broadcasts
@@ -852,13 +852,17 @@ func (sb *Broadcaster) sendInitialChartData(client *Client) {
 		// Send directly to the specific client with timeout to prevent hanging
 		select {
 		case client.send <- data:
-			utils.LogInfo("SHARDED_BROADCASTER", "Sent initial chart data to client %s", client.id)
+			if cacheHit {
+				utils.LogInfo("SHARDED_BROADCASTER", "Sent cached initial chart data to client %s", client.id)
+			} else {
+				utils.LogInfo("SHARDED_BROADCASTER", "Sent empty initial chart data to client %s (cache miss)", client.id)
+			}
 		case <-time.After(100 * time.Millisecond):
 			utils.LogWarn("SHARDED_BROADCASTER", "Timeout sending initial chart data to client %s", client.id)
 		default:
 			utils.LogWarn("SHARDED_BROADCASTER", "Client %s channel full, couldn't send initial chart data", client.id)
 		}
 	} else {
-		utils.LogWarn("SHARDED_BROADCASTER", "Chart service doesn't implement required interface")
+		utils.LogWarn("SHARDED_BROADCASTER", "Chart service doesn't implement cache-only interface")
 	}
 } 

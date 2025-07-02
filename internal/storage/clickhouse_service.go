@@ -97,8 +97,6 @@ func (c *ClickHouseService) Close() error {
 	return nil
 }
 
-
-
 // GetCache returns the cache instance for external services to use
 func (c *ClickHouseService) GetCache() *ChartDataCache {
 	return c.cache
@@ -285,8 +283,6 @@ func (c *ClickHouseService) InsertLatencyData(ctx context.Context, data []models
 	utils.LogInfo("CLICKHOUSE", "Inserted %d latency records", len(data))
 	return nil
 }
-
-
 
 // GetTransferRates gets optimized transfer rate analytics with caching (uses actual blockchain timestamp for accurate stats)
 func (c *ClickHouseService) GetTransferRates(ctx context.Context) (*FrontendTransferRates, error) {
@@ -648,6 +644,53 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 	
 	utils.LogInfo("CLICKHOUSE", "Chart data built and cached successfully (includes asset volume data with %d assets, latency data with %d points, node health data)", len(assetVolumeData.Assets), len(latencyData))
 	return chartData, nil
+}
+
+// GetChartDataForFrontendCacheOnly gets chart data ONLY from cache - never triggers database queries
+// This method is specifically for WebSocket initial connections to prevent connection pool exhaustion
+func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]interface{}, bool) {
+	// Try cache first for the complete chart data package
+	if data, hit := c.cache.Get("chart_data_frontend"); hit {
+		utils.LogDebug("CACHE", "Cache hit for chart_data_frontend (cache-only)")
+		return data.(map[string]interface{}), true
+	}
+	
+	utils.LogDebug("CACHE", "Cache miss for chart_data_frontend (cache-only) - building empty response")
+	
+	// Cache miss - return empty data structure instead of triggering database queries
+	chartData := map[string]interface{}{
+		"currentRates":             &FrontendTransferRates{},
+		"activeWalletRates":        &ActiveWalletRates{},
+		"popularRoutes":            []FrontendRouteData{},
+		"popularRoutesTimeScale":   make(map[string][]FrontendRouteData),
+		"activeSenders":            []FrontendWalletData{},
+		"activeReceivers":          []FrontendWalletData{},
+		"activeSendersTimeScale":   make(map[string][]FrontendWalletData),
+		"activeReceiversTimeScale": make(map[string][]FrontendWalletData),
+		"chainFlowData": &FrontendChainFlowData{
+			Chains:              []FrontendChainData{},
+			ChainFlowTimeScale:  make(map[string][]FrontendChainData),
+			TotalOutgoing:       0,
+			TotalIncoming:       0,
+			ServerUptimeSeconds: 0,
+		},
+		"assetVolumeData": &FrontendAssetVolumeData{
+			Assets:               []FrontendAsset{},
+			AssetVolumeTimeScale: make(map[string][]FrontendAsset),
+			TotalAssets:          0,
+			TotalVolume:          0,
+			TotalTransfers:       0,
+			ServerUptimeSeconds:  0,
+		},
+		"latencyData":    []interface{}{},
+		"nodeHealthData": nil,
+		"lastUpdated":    time.Now().Format("2006-01-02 15:04:05"),
+		"dataSource":     "cache_only",
+		"cached":         false,
+		"empty":          true, // Indicate this is empty data
+	}
+	
+	return chartData, false // false = cache miss, empty data returned
 }
 
 // GetPopularRoutes gets the most popular transfer routes with caching
@@ -1364,8 +1407,6 @@ func (c *ClickHouseService) ClearAssetVolumeCache() {
 	}
 }
 
-
-
 // ClearChainAssetsCache clears chain assets cache for all chains and timeframes
 func (c *ClickHouseService) ClearChainAssetsCache() {
 	// Clear all chain assets cache entries (pattern: chain_assets_*)
@@ -1449,7 +1490,6 @@ func (c *ClickHouseService) getAssetVolumesFromDB(ctx context.Context, timeframe
 		LIMIT 20
 	`, interval)
 
-	
 	rows, err := c.conn.Query(ctx, query)
 	if err != nil {
 		utils.LogError("CLICKHOUSE", "❌ DEBUG: Failed to query asset volumes: %v", err)
