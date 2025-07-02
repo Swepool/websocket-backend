@@ -24,13 +24,13 @@ type LatencyConfig struct {
 	MaxConcurrency int           `json:"maxConcurrency"` // Max concurrent latency checks
 }
 
-// DefaultLatencyConfig returns default latency monitoring configuration
+// DefaultLatencyConfig returns default latency monitoring configuration  
 func DefaultLatencyConfig() LatencyConfig {
 	return LatencyConfig{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  15 * time.Minute, // Further reduced to avoid rate limiting
-		RequestTimeout: 10 * time.Second, // Increased timeout for slower requests
-		MaxConcurrency: 3,  // Much more conservative - only 3 concurrent requests
+		CheckInterval:  2 * time.Minute, // Back to original - was working with partial data
+		RequestTimeout: 5 * time.Second, // Back to original
+		MaxConcurrency: 20, // Back to original - partial success is better than none
 	}
 }
 
@@ -162,8 +162,7 @@ func (s *LatencyService) FetchLatencyData(ctx context.Context) ([]models.Latency
 				s.semaphore <- struct{}{}
 				defer func() { <-s.semaphore }()
 
-				// Add delay between requests to avoid rate limiting
-				time.Sleep(100 * time.Millisecond)
+				// No artificial delays - let it run as it did before
 
 				// Check context cancellation before each request
 				select {
