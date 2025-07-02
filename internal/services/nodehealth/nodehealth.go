@@ -34,7 +34,7 @@ type Config struct {
 func DefaultNodeHealthConfig() Config {
 	return Config{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  5 * time.Minute, // Check every 5 minutes
+		CheckInterval:  4 * time.Minute, // Check every 4 minutes (well within 6min TTL)
 		RequestTimeout: 10 * time.Second, // 10 second timeout per request
 		MaxConcurrency: 10,               // Max 10 concurrent health checks
 	}

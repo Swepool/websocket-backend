@@ -11,7 +11,7 @@ import (
 
 // Constants for latency service
 const (
-	ChainsLoadDelay       = 10 * time.Second // Wait time for chains service to load
+	ChainsLoadDelay       = 5 * time.Second  // Wait time for chains service to load (reduced for faster cache population)
 	LatencyFetchTimeout   = 30 * time.Second // Timeout for latency data fetching
 	MinChainsForLatency   = 2                // Minimum chains needed for latency monitoring
 )
@@ -28,7 +28,7 @@ type LatencyConfig struct {
 func DefaultLatencyConfig() LatencyConfig {
 	return LatencyConfig{
 		GraphQLURL:     "https://staging.graphql.union.build/v1/graphql",
-		CheckInterval:  2 * time.Minute, // Back to original - was working with partial data
+		CheckInterval:  3 * time.Minute, // Every 3 minutes (well within 6min TTL, less aggressive than 2min)
 		RequestTimeout: 5 * time.Second, // Back to original
 		MaxConcurrency: 20, // Back to original - partial success is better than none
 	}
