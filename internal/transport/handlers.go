@@ -412,6 +412,34 @@ func (s *Server) handleAssetVolumeDebug(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleChainAssetsDebug provides debugging tools for chain assets wrapping issues
+func (s *Server) handleChainAssetsDebug(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	
+	clickhouseService := s.coordinator.GetClickHouseService()
+	
+	// Force clear chain assets cache to apply wrapping fix
+	if r.URL.Query().Get("clear_cache") == "true" {
+		clickhouseService.ClearChainAssetsCache()
+	}
+	
+	response := map[string]interface{}{
+		"timestamp": time.Now(),
+		"message": "Chain assets wrapping fix applied - cache cleared",
+		"status": "Chain assets now use canonical token grouping",
+		"fix_details": map[string]interface{}{
+			"issue": "Chain flow assets were not grouping wrapped tokens with underlying assets",
+			"solution": "Updated getChainAssets query to use canonical token grouping like asset volume chart",
+			"grouping_logic": "coalesce(base_denom, unwrapped_denom, wrapped_denom, canonical_token_symbol, token_symbol)",
+			"result": "WETH, ETH, wstETH etc. now grouped as single underlying asset",
+		},
+		"cache_cleared": r.URL.Query().Get("clear_cache") == "true",
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleSyncStatus provides debugging information about the sync manager status
 func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")

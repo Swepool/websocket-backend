@@ -1089,8 +1089,9 @@ func (c *ClickHouseService) getChainAssets(ctx context.Context, chainID, timefra
 	
 	query := fmt.Sprintf(`
 		SELECT 
-			token_symbol as asset_symbol,
-			canonical_token_symbol as asset_name,
+			coalesce(nullif(base_denom, ''), nullif(unwrapped_denom, ''), nullif(wrapped_denom, ''), canonical_token_symbol, token_symbol) as canonical_asset,
+			any(token_symbol) as asset_symbol,
+			any(canonical_token_symbol) as asset_name,
 			countIf(source_chain = '%s') as outgoing_count,
 			countIf(dest_chain = '%s') as incoming_count,
 			sum(amount) as total_volume,
@@ -1099,7 +1100,8 @@ func (c *ClickHouseService) getChainAssets(ctx context.Context, chainID, timefra
 		FROM transfers_analytics 
 		WHERE timestamp >= now() - INTERVAL %s
 		  AND (source_chain = '%s' OR dest_chain = '%s')
-		GROUP BY token_symbol, canonical_token_symbol
+		  AND token_symbol != '' AND token_symbol IS NOT NULL
+		GROUP BY canonical_asset
 		ORDER BY (outgoing_count + incoming_count) DESC
 		LIMIT ?
 	`, chainID, chainID, interval, chainID, chainID)
@@ -1116,11 +1118,12 @@ func (c *ClickHouseService) getChainAssets(ctx context.Context, chainID, timefra
 
 	for rows.Next() {
 		var asset FrontendChainAsset
+		var canonicalAsset string
 		var outgoingCount, incomingCount uint64
 		var lastActivity time.Time
 		
 		err := rows.Scan(
-			&asset.AssetSymbol, &asset.AssetName, &outgoingCount, &incomingCount,
+			&canonicalAsset, &asset.AssetSymbol, &asset.AssetName, &outgoingCount, &incomingCount,
 			&asset.TotalVolume, &asset.AverageAmount, &lastActivity,
 		)
 		if err != nil {
@@ -1147,6 +1150,7 @@ func (c *ClickHouseService) getChainAssets(ctx context.Context, chainID, timefra
 
 	// Store in cache
 	c.cache.SetWithTTL(cacheKey, assets, c.cacheConfig.PopularRoutesTTL)
+	utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: Chain assets for %s cached with %d assets (canonical grouping applied)", chainID, len(assets))
 	return assets, nil
 }
 
@@ -1351,6 +1355,24 @@ func (c *ClickHouseService) ClearAssetVolumeCache() {
 		cacheKey := fmt.Sprintf("asset_volumes_%s", tf)
 		c.cache.Delete(cacheKey)
 		utils.LogInfo("CLICKHOUSE", "Cleared asset volume cache for timeframe %s", tf)
+	}
+}
+
+// ClearChainAssetsCache clears chain assets cache for all chains and timeframes
+func (c *ClickHouseService) ClearChainAssetsCache() {
+	// Clear all chain assets cache entries (pattern: chain_assets_*)
+	cacheInfo := c.cache.GetCacheInfo()
+	if entries, ok := cacheInfo["entries"].(map[string]interface{}); ok {
+		keysToDelete := []string{}
+		for key := range entries {
+			if strings.HasPrefix(key, "chain_assets_") {
+				keysToDelete = append(keysToDelete, key)
+			}
+		}
+		for _, key := range keysToDelete {
+			c.cache.Delete(key)
+		}
+		utils.LogInfo("CLICKHOUSE", "Cleared %d chain assets cache entries (wrapping fix applied)", len(keysToDelete))
 	}
 }
 
