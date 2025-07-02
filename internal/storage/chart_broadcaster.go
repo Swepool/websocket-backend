@@ -362,25 +362,38 @@ func (cb *ChartBroadcaster) UpdateChartGroupB(ctx context.Context) {
 	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
 	
 	// Update asset volumes for all timeframes (cache TTL: 6 minutes)
+	successfulAssetUpdates := 0
 	for _, tf := range timeframes {
 		if _, err := cb.clickhouseService.GetAssetVolumes(ctx, tf); err != nil {
-			utils.LogError("CHART_BROADCASTER", "Failed to update asset volumes for %s: %v", tf, err)
+			utils.LogError("CHART_BROADCASTER", "❌ Failed to update asset volumes for %s: %v", tf, err)
+		} else {
+			successfulAssetUpdates++
 		}
 	}
+	utils.LogInfo("CHART_BROADCASTER", "✅ Asset volumes: %d/%d timeframes updated successfully", successfulAssetUpdates, len(timeframes))
 	
 	// Update active senders for all timeframes (cache TTL: 6 minutes)
+	successfulSenderUpdates := 0
 	for _, tf := range timeframes {
 		if _, err := cb.clickhouseService.GetTopSenders(ctx, 10, tf); err != nil {
-			utils.LogDebug("CHART_BROADCASTER", "Failed to update active senders for %s: %v", tf, err)
+			utils.LogError("CHART_BROADCASTER", "❌ Failed to update active senders for %s: %v", tf, err)
+		} else {
+			successfulSenderUpdates++
 		}
 	}
+	utils.LogInfo("CHART_BROADCASTER", "✅ Active senders: %d/%d timeframes updated successfully", successfulSenderUpdates, len(timeframes))
 	
 	// Update active receivers for all timeframes (cache TTL: 6 minutes)
+	successfulReceiverUpdates := 0
 	for _, tf := range timeframes {
 		if _, err := cb.clickhouseService.GetTopReceivers(ctx, 10, tf); err != nil {
-			utils.LogDebug("CHART_BROADCASTER", "Failed to update active receivers for %s: %v", tf, err)
+			utils.LogError("CHART_BROADCASTER", "❌ Failed to update active receivers for %s: %v", tf, err)
+		} else {
+			successfulReceiverUpdates++
 		}
 	}
+	utils.LogInfo("CHART_BROADCASTER", "✅ Active receivers: %d/%d timeframes updated successfully", successfulReceiverUpdates, len(timeframes))
 	
-	utils.LogInfo("CHART_BROADCASTER", "Chart group B update completed")
+	utils.LogInfo("CHART_BROADCASTER", "Chart group B update completed: %d assets, %d senders, %d receivers updated", 
+		successfulAssetUpdates, successfulSenderUpdates, successfulReceiverUpdates)
 } 
