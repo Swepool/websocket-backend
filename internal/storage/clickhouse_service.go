@@ -649,14 +649,190 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 // GetChartDataForFrontendCacheOnly gets chart data ONLY from cache - never triggers database queries
 // This method is specifically for WebSocket initial connections to prevent connection pool exhaustion
 func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]interface{}, bool) {
-	// Try cache first for the complete chart data package
-	if data, hit := c.cache.Get("chart_data_frontend"); hit {
-		utils.LogDebug("CACHE", "Cache hit for chart_data_frontend (cache-only)")
-		return data.(map[string]interface{}), true
+	// Read from the same individual cache keys that ChartBroadcaster uses
+	cache := c.cache
+	
+	// Check if we have at least the basic data cached (transfer rates is a good indicator)
+	if _, hit := cache.Get("transfer_rates"); !hit {
+		utils.LogDebug("CACHE", "Cache miss for basic transfer_rates (cache-only) - cache appears cold")
+		return nil, false
 	}
 	
-	utils.LogDebug("CACHE", "Cache miss for chart_data_frontend (cache-only) - no data returned")
-	return nil, false // Cache miss - return nil instead of empty structures
+	utils.LogDebug("CACHE", "Cache appears warm, building chart data from individual cache entries (cache-only)")
+	
+	// Read transfer rates from cache ONLY
+	var transferRates *FrontendTransferRates
+	if data, hit := cache.Get("transfer_rates"); hit {
+		transferRates = data.(*FrontendTransferRates)
+	} else {
+		transferRates = &FrontendTransferRates{}
+	}
+	
+	// Read active wallet rates from cache ONLY
+	var activeWalletRates *ActiveWalletRates
+	if data, hit := cache.Get("active_wallet_rates"); hit {
+		activeWalletRates = data.(*ActiveWalletRates)
+	} else {
+		activeWalletRates = &ActiveWalletRates{}
+	}
+	
+	// Read popular routes from cache ONLY
+	var popularRoutes []FrontendRouteData
+	if data, hit := cache.Get("popular_routes_7d_20"); hit {
+		popularRoutes = data.([]FrontendRouteData)
+	} else {
+		popularRoutes = []FrontendRouteData{}
+	}
+	
+	// Read popular routes for all timeframes from cache ONLY
+	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
+	popularRoutesTimeScale := make(map[string][]FrontendRouteData)
+	for _, tf := range timeframes {
+		cacheKey := fmt.Sprintf("popular_routes_%s_20", tf)
+		if data, hit := cache.Get(cacheKey); hit {
+			popularRoutesTimeScale[tf] = data.([]FrontendRouteData)
+		} else {
+			popularRoutesTimeScale[tf] = []FrontendRouteData{}
+		}
+	}
+	
+	// Read chain flow data from cache ONLY
+	var chainFlowData *FrontendChainFlowData
+	if data, hit := cache.Get("chain_flow_data_1d"); hit {
+		chainFlowData = data.(*FrontendChainFlowData)
+	} else {
+		chainFlowData = &FrontendChainFlowData{
+			Chains:              []FrontendChainData{},
+			ChainFlowTimeScale:  make(map[string][]FrontendChainData),
+			TotalOutgoing:       0,
+			TotalIncoming:       0,
+			ServerUptimeSeconds: 0,
+		}
+	}
+	
+	// Read chain flow data for all timeframes from cache ONLY
+	chainFlowTimeScale := make(map[string][]FrontendChainData)
+	for _, tf := range timeframes {
+		cacheKey := fmt.Sprintf("chain_flow_data_%s", tf)
+		if data, hit := cache.Get(cacheKey); hit {
+			if chainData, ok := data.(*FrontendChainFlowData); ok {
+				chainFlowTimeScale[tf] = chainData.Chains
+			} else {
+				chainFlowTimeScale[tf] = []FrontendChainData{}
+			}
+		} else {
+			chainFlowTimeScale[tf] = []FrontendChainData{}
+		}
+	}
+	
+	// Update chain flow data with timeScale
+	chainFlowData.ChainFlowTimeScale = chainFlowTimeScale
+	
+	// Read wallet activity from cache ONLY
+	var activeSenders []FrontendWalletData
+	if data, hit := cache.Get("top_senders_1h_10"); hit {
+		activeSenders = data.([]FrontendWalletData)
+	} else {
+		activeSenders = []FrontendWalletData{}
+	}
+	
+	var activeReceivers []FrontendWalletData
+	if data, hit := cache.Get("top_receivers_1h_10"); hit {
+		activeReceivers = data.([]FrontendWalletData)
+	} else {
+		activeReceivers = []FrontendWalletData{}
+	}
+	
+	// Read wallet activity for all timeframes from cache ONLY
+	activeSendersTimeScale := make(map[string][]FrontendWalletData)
+	activeReceiversTimeScale := make(map[string][]FrontendWalletData)
+	
+	for _, tf := range timeframes {
+		sendersCacheKey := fmt.Sprintf("top_senders_%s_10", tf)
+		if data, hit := cache.Get(sendersCacheKey); hit {
+			activeSendersTimeScale[tf] = data.([]FrontendWalletData)
+		} else {
+			activeSendersTimeScale[tf] = []FrontendWalletData{}
+		}
+		
+		receiversCacheKey := fmt.Sprintf("top_receivers_%s_10", tf)
+		if data, hit := cache.Get(receiversCacheKey); hit {
+			activeReceiversTimeScale[tf] = data.([]FrontendWalletData)
+		} else {
+			activeReceiversTimeScale[tf] = []FrontendWalletData{}
+		}
+	}
+	
+	// Read asset volume data from cache ONLY
+	var assetVolumeData *FrontendAssetVolumeData
+	if data, hit := cache.Get("asset_volumes_1h"); hit {
+		assetVolumeData = data.(*FrontendAssetVolumeData)
+	} else {
+		assetVolumeData = &FrontendAssetVolumeData{
+			Assets:               []FrontendAsset{},
+			AssetVolumeTimeScale: make(map[string][]FrontendAsset),
+			TotalAssets:          0,
+			TotalVolume:          0,
+			TotalTransfers:       0,
+			ServerUptimeSeconds:  0,
+		}
+	}
+	
+	// Read asset volume data for all timeframes from cache ONLY
+	assetVolumeTimeScale := make(map[string][]FrontendAsset)
+	for _, tf := range timeframes {
+		cacheKey := fmt.Sprintf("asset_volumes_%s", tf)
+		if data, hit := cache.Get(cacheKey); hit {
+			if assetData, ok := data.(*FrontendAssetVolumeData); ok {
+				assetVolumeTimeScale[tf] = assetData.Assets
+			} else {
+				assetVolumeTimeScale[tf] = []FrontendAsset{}
+			}
+		} else {
+			assetVolumeTimeScale[tf] = []FrontendAsset{}
+		}
+	}
+	
+	// Update asset volume data with timeScale
+	assetVolumeData.AssetVolumeTimeScale = assetVolumeTimeScale
+	
+	// Get latency data from cache ONLY
+	var latencyData []interface{}
+	if data, hit := cache.Get("latency_data"); hit {
+		latencyData = data.([]interface{})
+	} else {
+		latencyData = []interface{}{}
+	}
+	
+	// Get node health data from cache ONLY
+	var nodeHealthData interface{}
+	if data, hit := cache.Get("node_health_data"); hit {
+		nodeHealthData = data
+	} else {
+		nodeHealthData = nil
+	}
+	
+	// Build comprehensive chart data payload (same format as ChartBroadcaster)
+	chartData := map[string]interface{}{
+		"currentRates":             transferRates,
+		"activeWalletRates":        activeWalletRates,
+		"popularRoutes":            popularRoutes,
+		"popularRoutesTimeScale":   popularRoutesTimeScale,
+		"activeSenders":            activeSenders,
+		"activeReceivers":          activeReceivers,
+		"activeSendersTimeScale":   activeSendersTimeScale,
+		"activeReceiversTimeScale": activeReceiversTimeScale,
+		"chainFlowData":            chainFlowData,
+		"assetVolumeData":          assetVolumeData,
+		"latencyData":              latencyData,
+		"nodeHealthData":           nodeHealthData,
+		"lastUpdated":              time.Now().Format("2006-01-02 15:04:05"),
+		"dataSource":               "cache_only",
+		"cached":                   true,
+	}
+	
+	utils.LogDebug("CACHE", "Built chart data from individual cache entries (cache-only)")
+	return chartData, true
 }
 
 // GetPopularRoutes gets the most popular transfer routes with caching
