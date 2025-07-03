@@ -50,18 +50,17 @@ func NewClickHouseService(config ClickHouseConfig) (*ClickHouseService, error) {
 			}
 		},
 		Settings: clickhouse.Settings{
-			"max_execution_time": 30,          // Query timeout (client-level)
-			"max_memory_usage":   "2000000000", // Reduced from 4GB to 2GB per query
-			"max_threads":        4,            // Reduced from 8 to 4 threads per query
-			// Server-level settings moved to config.xml
+			"max_execution_time": 30,      
+			"max_memory_usage":   "2000000000", 
+			"max_threads":        4,            
 		},
 		Compression: &clickhouse.Compression{
 			Method: clickhouse.CompressionLZ4,
 		},
 		DialTimeout:     15 * time.Second,
-		MaxOpenConns:    12,  // Reasonable for serialized analytics + 2 fetchers
-		MaxIdleConns:    6,   // Keep some idle connections for performance
-		ConnMaxLifetime: 30 * time.Minute, // Shorter lifetime
+		MaxOpenConns:    25,  
+		MaxIdleConns:    8,   
+		ConnMaxLifetime: 30 * time.Minute,
 	}
 
 	// Create connection
@@ -485,7 +484,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		popularRoutes = []FrontendRouteData{} // Default to empty
 	}
 	
-	// Get popular routes for all timeframes (for timeScale data) - SERIALIZED to reduce concurrent connections
+	// Get popular routes for all timeframes (for timeScale data)
 	timeframes := []string{"5m", "1h", "1d", "7d", "14d", "30d"}
 	popularRoutesTimeScale := make(map[string][]FrontendRouteData)
 	for _, tf := range timeframes {
@@ -495,8 +494,6 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 			routes = []FrontendRouteData{}
 		}
 		popularRoutesTimeScale[tf] = routes
-		// Small delay to prevent connection pool exhaustion
-		time.Sleep(10 * time.Millisecond)
 	}
 	
 	// Get chain flow data for default timeframe (last day)
@@ -516,7 +513,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		utils.LogInfo("CLICKHOUSE", "🔍 DEBUG: Got chain flow data with %d chains", len(chainFlowData.Chains))
 	}
 	
-	// Get chain flow data for all timeframes (for timeScale data) - SERIALIZED
+	// Get chain flow data for all timeframes (for timeScale data)
 	chainFlowTimeScale := make(map[string][]FrontendChainData)
 	for _, tf := range timeframes {
 		chainData, err := c.GetChainFlowData(ctx, tf)
@@ -526,7 +523,6 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		} else {
 			chainFlowTimeScale[tf] = chainData.Chains
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	
 	// Update chain flow data with timeScale
@@ -556,7 +552,6 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 			senders = []FrontendWalletData{}
 		}
 		activeSendersTimeScale[tf] = senders
-		time.Sleep(10 * time.Millisecond)
 		
 		receivers, err := c.GetTopReceivers(ctx, 10, tf)
 		if err != nil {
@@ -564,7 +559,6 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 			receivers = []FrontendWalletData{}
 		}
 		activeReceiversTimeScale[tf] = receivers
-		time.Sleep(10 * time.Millisecond)
 	}
 	
 	// Get asset volume data for initial client connections
@@ -583,7 +577,7 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		}
 	}
 
-	// Get asset volume data for all timeframes (for timeScale data) - SERIALIZED
+	// Get asset volume data for all timeframes (for timeScale data)
 	// timeframes already declared above
 	assetVolumeTimeScale := make(map[string][]FrontendAsset)
 	for _, tf := range timeframes {
@@ -594,7 +588,6 @@ func (c *ClickHouseService) GetChartDataForFrontend() (map[string]interface{}, e
 		} else {
 			assetVolumeTimeScale[tf] = assetData.Assets
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Update asset volume data with timeScale
@@ -787,7 +780,7 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 	// Update asset volume data with timeScale
 	assetVolumeData.AssetVolumeTimeScale = assetVolumeTimeScale
 	
-	// Get latency data from cache ONLY
+	// Get latency data from cache ONLY (auxiliary - can be empty)
 	var latencyData []interface{}
 	if data, hit := cache.Get("latency_data"); hit {
 		latencyData = data.([]interface{})
@@ -795,7 +788,7 @@ func (c *ClickHouseService) GetChartDataForFrontendCacheOnly() (map[string]inter
 		latencyData = []interface{}{}
 	}
 	
-	// Get node health data from cache ONLY
+	// Get node health data from cache ONLY (auxiliary - can be empty)
 	var nodeHealthData interface{}
 	if data, hit := cache.Get("node_health_data"); hit {
 		nodeHealthData = data
