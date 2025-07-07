@@ -114,8 +114,8 @@ func LoadConfig() Config {
 		},
 		Processor: ProcessorConfig{
 			NaturalFlow:  getEnvBool("PROCESSOR_NATURAL_FLOW", true),
-			FlowMinDelay: getEnvDuration("PROCESSOR_FLOW_MIN_DELAY", 50*time.Millisecond),
-			FlowMaxDelay: getEnvDuration("PROCESSOR_FLOW_MAX_DELAY", 200*time.Millisecond),
+			FlowMinDelay: getEnvDuration("PROCESSOR_FLOW_MIN_DELAY", 0*time.Millisecond),
+			FlowMaxDelay: getEnvDuration("PROCESSOR_FLOW_MAX_DELAY", 50*time.Millisecond),
 			MaxBurstSize: getEnvInt("PROCESSOR_MAX_BURST_SIZE", 1),
 		},
 		Batcher: BatcherConfig{
