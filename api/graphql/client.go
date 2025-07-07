@@ -447,7 +447,7 @@ func (c *Client) FetchNewTransfersSafe(ctx context.Context, lastSortOrder string
 	
 	// Filter out transfers that are too recent (within 10 seconds)
 	safeTransfers := make([]models.Transfer, 0, len(allTransfers))
-	cutoffTime := time.Now().UTC().Add(-10 * time.Second)
+	cutoffTime := time.Now().UTC().Add(-20 * time.Second)
 	
 	for _, transfer := range allTransfers {
 		if transfer.TransferSendTimestamp.Before(cutoffTime) || transfer.TransferSendTimestamp.Equal(cutoffTime) {
